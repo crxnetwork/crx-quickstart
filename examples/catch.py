@@ -9,7 +9,6 @@ async def main():
         await ws.send(json.dumps({"type": "logon", "api_key": os.environ["CRX_API_KEY"]}))
         while True:
             frame = json.loads(await ws.recv())
-            # without logon_ack a quiet socket and a refused one look the same
             if frame["type"] == "logon_ack":
                 d = frame["data"]
                 print("logged on as", d["account"], "role", d["role"], "- waiting for an RFQ")

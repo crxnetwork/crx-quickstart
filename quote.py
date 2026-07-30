@@ -2,7 +2,7 @@
 from crx_maker import on_rfq, quote
 
 PAIR = "USDJPY"
-RATE = "146.250000"       # a decimal string, never a float
+RATE = "146.250000"       # a decimal string
 MARGIN_BPS = 292          # initial margin in basis points, taker and maker alike
 FIRM_FOR_SECS = 60
 

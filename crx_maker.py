@@ -1,4 +1,4 @@
-"""Copy this maker plumbing once and never edit it."""
+"""Copy this maker plumbing once."""
 __version__ = "1.0.0"
 
 import asyncio, json, os, time
@@ -122,7 +122,7 @@ def on_rfq(handler, *pairs):
                     backoff = 1
                     async for raw in ws:
                         frame = json.loads(raw)
-                        if frame["type"] == "error":   # retrying a refused logon changes nothing
+                        if frame["type"] == "error":
                             print("logon refused:", frame.get("data"))
                             return
                         if frame.get("seq"):

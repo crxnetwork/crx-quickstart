@@ -15,7 +15,7 @@ DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,"
 
 # --- the fixture, copied from api/signing.md ---
 CHAIN_ID = 84532
-VERIFYING_CONTRACT = "0x8B1473D7e32E57d906f81567154a843b13cccE15"   # a fixture, not a live core
+VERIFYING_CONTRACT = "0x8B1473D7e32E57d906f81567154a843b13cccE15"   # a fixture
 TAKER = "0x1111111111111111111111111111111111111111"
 MAKER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"                # the public Anvil test key
 NOTIONAL = int(Decimal("1500000.00").scaleb(6))                     # = 1500000000000
@@ -77,7 +77,7 @@ def main():
          PREMIUM_BPS, EXPIRY, nonce, keccak_instr]))
     check("structHash", struct_hash, EXPECT_STRUCT_HASH)
 
-    # terms_hash is the raw 0x1901 EIP-712 digest, with no eth_sign prefix
+    # terms_hash is the raw 0x1901 EIP-712 digest
     terms_hash = keccak(b"\x19\x01" + domain_sep + struct_hash)
     check("terms_hash", terms_hash, EXPECT_TERMS_HASH)
 

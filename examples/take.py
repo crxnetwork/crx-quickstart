@@ -10,11 +10,11 @@ from eth_account import Account
 from eth_utils import keccak
 from crx_maker import ACCT, BASE, HDR, TERMS_TYPEHASH, _body, _separator
 
-CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"   # notional is a string, never a float
+CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"   # notional is a string
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000               # the wire carries unix ms
 
 def taker_digest(rfq, q):
-    """Rebuild the digest the maker signed, so the gateway's terms_hash is checked and never trusted."""
+    """Rebuild the digest the maker signed, so the gateway's terms_hash is checked."""
     blob = (b"\x01" + bytes.fromhex(rfq["pair_id"][2:])
             + ((1 if rfq["side"] == "buy" else -1) & 0xFF).to_bytes(1, "big")
             + (rfq["settlement"] // 1000).to_bytes(5, "big")   # the u40 header packs seconds
@@ -40,7 +40,7 @@ async def main():
         async for raw in ws:
             frame = json.loads(raw)
             data = frame.get("data") or {}
-            # every fact the Terms digest needs arrives on rfq.opened, not on the POST ack
+            # every fact the Terms digest needs arrives on rfq.opened
             if frame["type"] == "rfq.opened" and data["rfq"]["rfq_id"] == rfq_id:
                 rfq = data["rfq"]
             if rfq and frame["type"] == "rfq.quoted" and data["quote"]["rfq_id"] == rfq_id:
