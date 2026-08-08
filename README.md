@@ -10,7 +10,7 @@ pip install -r requirements.txt
 cp .env.example .env        # fill in CRX_API_KEY, CRX_MAKER_PK
 set -a; . ./.env; set +a    # a missing name fails at import as KeyError: 'CRX_API_KEY'
 
-python quote.py
+python3 quote.py
 ```
 
 `CRX_BASE` is optional and defaults to `https://api.crxfx.com`.
@@ -74,17 +74,17 @@ cp .env.example .env.taker   # the taker key and its bound EOA
 
 # shell one
 set -a; . ./.env; set +a
-python quote.py
+python3 quote.py
 
 # shell two
 set -a; . ./.env.taker; set +a
-python examples/take.py
+python3 examples/take.py
 ```
 
 ## Verify
 
 ```bash
-python verify.py
+python3 verify.py
 ```
 
 - With only the maker key set, it checks `/health`, the domain, and the socket logon, then exits 0.
@@ -93,7 +93,7 @@ python verify.py
 
 ## Examples
 
-Run them from the repo root, `python examples/catch.py`.
+Run them from the repo root, `python3 examples/catch.py`.
 
 - `examples/verify_signing.py`: run first, recomputing the nonce, instrument, domain separator, struct hash, terms_hash, and signature against the fixed fixture on [the signing page](https://portal.crxfx.com/docs/api/signing). No network, no env.
 - `examples/catch.py`: hold the socket, print the logon ack, then the first RFQ. Needs `CRX_API_KEY`.
