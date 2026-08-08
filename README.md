@@ -7,11 +7,13 @@ Python 3.9 or newer.
 ```bash
 pip install -r requirements.txt
 
-cp .env.example .env        # fill in CRX_API_KEY, CRX_BASE, CRX_MAKER_PK
-set -a; . ./.env; set +a    # a missing name fails at import as KeyError: 'CRX_BASE'
+cp .env.example .env        # fill in CRX_API_KEY, CRX_MAKER_PK
+set -a; . ./.env; set +a    # a missing name fails at import as KeyError: 'CRX_API_KEY'
 
 python quote.py
 ```
+
+`CRX_BASE` is optional and defaults to `https://api.crxfx.com`.
 
 ## quote.py
 
@@ -79,14 +81,24 @@ set -a; . ./.env.taker; set +a
 python examples/take.py
 ```
 
+## Verify
+
+```bash
+python verify.py
+```
+
+- With only the maker key set, it checks `/health`, the domain, and the socket logon, then exits 0.
+- With `CRX_TAKER_KEY` and `CRX_TAKER_PK` set, it runs the full round trip in one process: open, quote, accept, `trade.opened`.
+- It prints PASS with the trade id and tx, or FAIL naming the stage it reached.
+
 ## Examples
 
 Run them from the repo root, `python examples/catch.py`.
 
 - `examples/verify_signing.py`: run first, recomputing the nonce, instrument, domain separator, struct hash, terms_hash, and signature against the fixed fixture on [the signing page](https://portal.crxfx.com/docs/api/signing). No network, no env.
-- `examples/catch.py`: hold the socket, print the logon ack, then the first RFQ. Needs `CRX_API_KEY`, `CRX_BASE`.
-- `examples/take.py`: open an RFQ, rebuild and sign the maker's Terms off `rfq.opened`, accept, and hold for the fill. Needs a taker key in `CRX_API_KEY`, plus `CRX_BASE` and the bound taker private key in `CRX_MAKER_PK`.
-- `examples/sign.py`: build and sign the Terms digest for a sample RFQ through `crx_maker` internals, with no `quote()` call. Needs `CRX_API_KEY`, `CRX_BASE`, `CRX_MAKER_PK`, because importing `crx_maker` reads all three and pulls the live domain off `/health`.
-- `examples/cancel.py`: pull a firm quote before it opens, through `crx_maker.cancel_quote`. Needs `CRX_RPC_URL`, `CRX_CORE`, `CRX_MAKER_PK`, and the `CRX_API_KEY` and `CRX_BASE` that `crx_maker` reads at import.
-- `examples/deposit.py`: the gateway builds the txs, with an approve first when allowance falls short. Sign and submit them, through `crx_maker.deposit`. Needs `CRX_RPC_URL`, `CRX_MAKER_PK`, `CRX_API_KEY`, `CRX_BASE`.
-- `examples/withdraw.py`: the gateway preflights coverage and builds the tx, through `crx_maker.withdraw`. Needs `CRX_RPC_URL`, `CRX_MAKER_PK`, `CRX_API_KEY`, `CRX_BASE`, `CRX_RECIPIENT`.
+- `examples/catch.py`: hold the socket, print the logon ack, then the first RFQ. Needs `CRX_API_KEY`.
+- `examples/take.py`: open an RFQ, rebuild and sign the maker's Terms off `rfq.opened`, accept, and hold for the fill. Needs a taker key in `CRX_API_KEY`, plus the bound taker private key in `CRX_MAKER_PK`.
+- `examples/sign.py`: build and sign the Terms digest for a sample RFQ through `crx_maker` internals, with no `quote()` call. Needs `CRX_API_KEY` and `CRX_MAKER_PK`, because importing `crx_maker` reads both and pulls the live domain off `/health`.
+- `examples/cancel.py`: pull a firm quote before it opens, through `crx_maker.cancel_quote`. Needs `CRX_RPC_URL`, `CRX_CORE`, `CRX_MAKER_PK`, and the `CRX_API_KEY` that `crx_maker` reads at import.
+- `examples/deposit.py`: the gateway builds the txs, with an approve first when allowance falls short. Sign and submit them, through `crx_maker.deposit`. Needs `CRX_RPC_URL`, `CRX_MAKER_PK`, `CRX_API_KEY`.
+- `examples/withdraw.py`: the gateway preflights coverage and builds the tx, through `crx_maker.withdraw`. Needs `CRX_RPC_URL`, `CRX_MAKER_PK`, `CRX_API_KEY`, `CRX_RECIPIENT`.

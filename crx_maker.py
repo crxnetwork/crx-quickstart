@@ -36,7 +36,7 @@ def _body(response):
     return body
 
 
-BASE = os.environ["CRX_BASE"].rstrip("/")          # https://api.crxfx.com
+BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
 ROOT = BASE                                        # every path hangs off the host root
 KEY = os.environ["CRX_API_KEY"]
 ACCT = Account.from_key(os.environ["CRX_MAKER_PK"])

@@ -2,7 +2,7 @@
 import asyncio, json, os
 import websockets
 
-WS = os.environ["CRX_BASE"].replace("https://", "wss://") + "/ws"
+WS = os.environ.get("CRX_BASE", "https://api.crxfx.com").replace("https://", "wss://") + "/ws"
 
 async def main():
     async with websockets.connect(WS) as ws:
