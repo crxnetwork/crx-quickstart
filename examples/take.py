@@ -1,4 +1,4 @@
-# take.py: the taker leg, needing a taker key in CRX_API_KEY and its bound private key in CRX_MAKER_PK
+# take.py: the taker leg, needing the taker private key in CRX_MAKER_PK (crx_maker logs it in at import)
 import asyncio, json, os, sys, pathlib, time, uuid
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -8,7 +8,7 @@ import requests, websockets
 from eth_abi import encode
 from eth_account import Account
 from eth_utils import keccak
-from crx_maker import ACCT, BASE, HDR, TERMS_TYPEHASH, _body, _separator
+from crx_maker import ACCT, BASE, HDR, TERMS_TYPEHASH, _body, _separator, _ws, token
 
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"   # notional is a string
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000               # the wire carries unix ms
@@ -29,9 +29,9 @@ def taker_digest(rfq, q):
 
 # nothing here completes without a maker quoting the same pair on the other side
 async def main():
-    async with websockets.connect(BASE.replace("https://", "wss://") + "/ws",
+    async with websockets.connect(_ws(BASE) + "/ws",
                                   ping_interval=20, ping_timeout=20) as ws:
-        await ws.send(json.dumps({"type": "logon", "api_key": os.environ["CRX_API_KEY"]}))
+        await ws.send(json.dumps({"type": "logon", "token": token}))
         ack = _body(requests.post(f"{BASE}/rfqs", headers=HDR, timeout=10, json={
             "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,
             "notional": NOTIONAL, "client_rfq_id": f"take-{uuid.uuid4().hex[:12]}"}))

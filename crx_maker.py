@@ -7,6 +7,7 @@ from decimal import Decimal
 import requests, websockets
 from eth_abi import encode
 from eth_account import Account
+from eth_account.messages import encode_defunct
 from eth_utils import keccak
 from web3 import Web3
 
@@ -38,9 +39,35 @@ def _body(response):
 
 BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
 ROOT = BASE                                        # every path hangs off the host root
-KEY = os.environ["CRX_API_KEY"]
 ACCT = Account.from_key(os.environ["CRX_MAKER_PK"])
-HDR = {"x-api-key": KEY, "content-type": "application/json"}
+HDR = {"content-type": "application/json"}          # login() fills in the Bearer header in place
+token = None                                        # the session JWT, set by login()
+
+
+def _ws(base):
+    """Map the REST scheme to the socket scheme, so loopback http becomes ws not wss."""
+    return base.replace("https://", "wss://").replace("http://", "ws://")
+
+
+def login():
+    """Prove ACCT's address by signing the gateway challenge, store the session token, and set HDR in place.
+
+    Mutates the module-level HDR dict — never rebinds it — so `from crx_maker import HDR` in another
+    module sees the Bearer header after login runs.
+    """
+    global token
+    message = _body(requests.get(f"{ROOT}/auth/nonce", timeout=10,
+                                 params={"address": ACCT.address.lower(), "chain": "base"}))["message"]
+    sig = Account.sign_message(encode_defunct(text=message), ACCT.key).signature.to_0x_hex()
+    body = _body(requests.post(f"{ROOT}/auth/login", timeout=10,
+                               json={"address": ACCT.address.lower(), "sig": sig}))
+    token = body["token"]
+    HDR.clear()
+    HDR.update({"Authorization": f"Bearer {token}", "content-type": "application/json"})
+    return token
+
+
+login()
 
 TERMS_TYPE = ("Terms(address taker,address maker,uint256 notional,"
               "uint16 imBpsTaker,uint16 imBpsMaker,uint16 premiumBps,"
@@ -106,7 +133,7 @@ def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
 
 def on_rfq(handler, *pairs):
     """Block forever calling handler(rfq) per RFQ on the named pairs, resuming from the last seq after a drop."""
-    url = ROOT.replace("https://", "wss://") + "/ws"
+    url = _ws(ROOT) + "/ws"
 
     async def run():
         seq, backoff = None, 1
@@ -114,7 +141,7 @@ def on_rfq(handler, *pairs):
             try:
                 # pings keep a dead but open socket from looking alive forever
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    logon = {"type": "logon", "api_key": KEY}
+                    logon = {"type": "logon", "token": token}
                     if seq is not None:
                         logon["since"] = seq
                     await ws.send(json.dumps(logon))

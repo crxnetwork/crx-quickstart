@@ -5,19 +5,30 @@ from decimal import Decimal
 import requests, websockets
 from eth_abi import encode
 from eth_account import Account
+from eth_account.messages import encode_defunct
 from eth_utils import keccak
 
 import crx_maker
-from crx_maker import ACCT, BASE, TERMS_TYPEHASH, _body, _separator, quote
+from crx_maker import ACCT, BASE, TERMS_TYPEHASH, _body, _separator, _ws, quote
 
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
-WS = BASE.replace("https://", "wss://") + "/ws"
+WS = _ws(BASE) + "/ws"
 stage = "health"
 
 
-async def logon(ws, key):
-    await ws.send(json.dumps({"type": "logon", "api_key": key}))
+def _login(acct):
+    """Sign the challenge for this account and return (token, Bearer header)."""
+    message = _body(requests.get(f"{BASE}/auth/nonce", timeout=10,
+                                 params={"address": acct.address.lower(), "chain": "base"}))["message"]
+    sig = Account.sign_message(encode_defunct(text=message), acct.key).signature.to_0x_hex()
+    tok = _body(requests.post(f"{BASE}/auth/login", timeout=10,
+                              json={"address": acct.address.lower(), "sig": sig}))["token"]
+    return tok, {"Authorization": f"Bearer {tok}", "content-type": "application/json"}
+
+
+async def logon(ws, tok):
+    await ws.send(json.dumps({"type": "logon", "token": tok}))
     async for raw in ws:
         frame = json.loads(raw)
         if frame["type"] == "logon_ack":
@@ -61,15 +72,15 @@ async def run():
           ",".join(sorted(crx_maker.CHAINS)), "- domain checked")
     stage = "maker logon"
     async with websockets.connect(WS, ping_interval=20, ping_timeout=20) as maker_ws:
-        ack = await logon(maker_ws, os.environ["CRX_API_KEY"])
+        ack = await logon(maker_ws, crx_maker.token)
         print("maker logged on as", ack["account"], "role", ack["role"])
-        taker_key, taker_pk = os.environ.get("CRX_TAKER_KEY"), os.environ.get("CRX_TAKER_PK")
-        if not (taker_key and taker_pk):
-            print("connectivity check passed. the full round trip needs CRX_TAKER_KEY and CRX_TAKER_PK")
+        taker_pk = os.environ.get("CRX_TAKER_PK")
+        if not taker_pk:
+            print("connectivity check passed. the full round trip needs CRX_TAKER_PK")
             return
         stage = "taker logon"
         taker = Account.from_key(taker_pk)
-        hdr = {"x-api-key": taker_key, "content-type": "application/json"}
+        taker_token, hdr = _login(taker)
 
         async def taker_leg(ws, rfq_id):
             global stage
@@ -97,7 +108,7 @@ async def run():
                     return
 
         async with websockets.connect(WS, ping_interval=20, ping_timeout=20) as taker_ws:
-            await logon(taker_ws, taker_key)
+            await logon(taker_ws, taker_token)
             stage = "rfq open"
             ack = _body(requests.post(f"{BASE}/rfqs", headers=hdr, timeout=10, json={
                 "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,

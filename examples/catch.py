@@ -1,12 +1,30 @@
-# catch.py: hold the socket until the first RFQ arrives
+# catch.py: hold the socket until the first RFQ arrives. Needs CRX_MAKER_PK; it logs itself in.
 import asyncio, json, os
-import websockets
+import requests, websockets
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
-WS = os.environ.get("CRX_BASE", "https://api.crxfx.com").replace("https://", "wss://") + "/ws"
+BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
+ACCT = Account.from_key(os.environ["CRX_MAKER_PK"])
+
+
+def _ws(base):
+    return base.replace("https://", "wss://").replace("http://", "ws://")
+
+
+def login():
+    """Sign the gateway challenge for ACCT and return the session token."""
+    message = requests.get(f"{BASE}/auth/nonce", timeout=10,
+                           params={"address": ACCT.address.lower(), "chain": "base"}).json()["message"]
+    sig = Account.sign_message(encode_defunct(text=message), ACCT.key).signature.to_0x_hex()
+    return requests.post(f"{BASE}/auth/login", timeout=10,
+                         json={"address": ACCT.address.lower(), "sig": sig}).json()["token"]
+
 
 async def main():
-    async with websockets.connect(WS) as ws:
-        await ws.send(json.dumps({"type": "logon", "api_key": os.environ["CRX_API_KEY"]}))
+    token = login()
+    async with websockets.connect(_ws(BASE) + "/ws") as ws:
+        await ws.send(json.dumps({"type": "logon", "token": token}))
         while True:
             frame = json.loads(await ws.recv())
             if frame["type"] == "logon_ack":
