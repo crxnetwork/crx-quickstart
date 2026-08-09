@@ -5,11 +5,10 @@ from decimal import Decimal
 import requests, websockets
 from eth_abi import encode
 from eth_account import Account
-from eth_account.messages import encode_defunct
 from eth_utils import keccak
 
 import crx_maker
-from crx_maker import ACCT, BASE, TERMS_TYPEHASH, _body, _separator, _ws, quote
+from crx_maker import BASE, TERMS_TYPEHASH, _body, _separator, _ws, login_frame, quote
 
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
@@ -17,18 +16,13 @@ WS = _ws(BASE) + "/ws"
 stage = "health"
 
 
-def _login(acct):
-    """Sign the challenge for this account and return (token, Bearer header)."""
-    message = _body(requests.get(f"{BASE}/auth/nonce", timeout=10,
-                                 params={"address": acct.address.lower(), "chain": "base"}))["message"]
-    sig = Account.sign_message(encode_defunct(text=message), acct.key).signature.to_0x_hex()
-    tok = _body(requests.post(f"{BASE}/auth/login", timeout=10,
-                              json={"address": acct.address.lower(), "sig": sig}))["token"]
-    return tok, {"Authorization": f"Bearer {tok}", "content-type": "application/json"}
-
-
-async def logon(ws, tok):
-    await ws.send(json.dumps({"type": "logon", "token": tok}))
+async def logon(ws, signer_acct, custody):
+    """Read the challenge, sign the hello with signer_acct on custody's behalf, return the logon_ack data."""
+    challenge = json.loads(await ws.recv())
+    if challenge.get("type") != "challenge":
+        print(f"FAIL at {stage}: expected challenge, got", challenge)
+        sys.exit(1)
+    await ws.send(json.dumps(login_frame(challenge["nonce"], signer_acct, custody, crx_maker.PRIMARY_CHAIN_ID)))
     async for raw in ws:
         frame = json.loads(raw)
         if frame["type"] == "logon_ack":
@@ -72,15 +66,15 @@ async def run():
           ",".join(sorted(crx_maker.CHAINS)), "- domain checked")
     stage = "maker logon"
     async with websockets.connect(WS, ping_interval=20, ping_timeout=20) as maker_ws:
-        ack = await logon(maker_ws, crx_maker.token)
+        ack = await logon(maker_ws, crx_maker.SIGNER, crx_maker.CUSTODY)
         print("maker logged on as", ack["account"], "role", ack["role"])
-        taker_pk = os.environ.get("CRX_TAKER_PK")
+        taker_pk = os.environ.get("CRX_TAKER_SIGNER_PK")
         if not taker_pk:
-            print("connectivity check passed. the full round trip needs CRX_TAKER_PK")
+            print("connectivity check passed. the full round trip needs CRX_TAKER_SIGNER_PK and CRX_TAKER_CUSTODY")
             return
         stage = "taker logon"
         taker = Account.from_key(taker_pk)
-        taker_token, hdr = _login(taker)
+        taker_custody = os.environ["CRX_TAKER_CUSTODY"].lower()
 
         async def taker_leg(ws, rfq_id):
             global stage
@@ -93,14 +87,14 @@ async def run():
                     rfq = data["rfq"]
                 if rfq and frame["type"] == "rfq.quoted" and data["quote"]["rfq_id"] == rfq_id:
                     q = data["quote"]
-                    # the live solver may also quote, so only this maker's quote is accepted
-                    if q["maker"].lower() != ACCT.address.lower():
+                    # the live solver may also quote, so only this maker's custody is accepted
+                    if q["maker"].lower() != crx_maker.CUSTODY:
                         continue
                     stage = "taker accept"
                     digest = taker_digest(rfq, q)
                     assert q["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
                     sig = Account.unsafe_sign_hash(digest, taker.key).signature.to_0x_hex()
-                    _body(requests.post(f"{BASE}/rfqs/{rfq_id}/accept", headers=hdr, timeout=10,
+                    _body(requests.post(f"{BASE}/rfqs/{rfq_id}/accept", headers=crx_maker.HDR, timeout=10,
                                         json={"quote_id": q["quote_id"], "sig_taker": sig}))
                     stage = "trade open"
                 if frame["type"] == "trade.opened" and data.get("rfq_id") == rfq_id:
@@ -108,9 +102,9 @@ async def run():
                     return
 
         async with websockets.connect(WS, ping_interval=20, ping_timeout=20) as taker_ws:
-            await logon(taker_ws, taker_token)
+            await logon(taker_ws, taker, taker_custody)
             stage = "rfq open"
-            ack = _body(requests.post(f"{BASE}/rfqs", headers=hdr, timeout=10, json={
+            ack = _body(requests.post(f"{BASE}/rfqs", headers=crx_maker.HDR, timeout=10, json={
                 "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,
                 "notional": NOTIONAL, "client_rfq_id": f"verify-{uuid.uuid4().hex[:12]}"}))
             print("rfq", ack["rfq_id"])

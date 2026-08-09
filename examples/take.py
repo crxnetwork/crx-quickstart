@@ -1,17 +1,60 @@
-# take.py: the taker leg, needing the taker private key in CRX_MAKER_PK (crx_maker logs it in at import)
-import asyncio, json, os, sys, pathlib, time, uuid
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-
+# take.py: the taker leg. Opens an RFQ, signs the maker's Terms to accept. Needs CRX_TAKER_SIGNER_PK + CRX_TAKER_CUSTODY.
+import asyncio, json, os, time, uuid
 from decimal import Decimal
 
 import requests, websockets
 from eth_abi import encode
 from eth_account import Account
+from eth_account.messages import encode_defunct
 from eth_utils import keccak
-from crx_maker import ACCT, BASE, HDR, TERMS_TYPEHASH, _body, _separator, _ws, token
 
+BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
+SIGNER = Account.from_key(os.environ["CRX_TAKER_SIGNER_PK"])   # the taker hot key, signs everything
+CUSTODY = os.environ["CRX_TAKER_CUSTODY"].lower()             # the taker cold party address
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"   # notional is a string
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000               # the wire carries unix ms
+
+TERMS_TYPEHASH = keccak(text="Terms(address taker,address maker,uint256 notional,uint16 imBpsTaker,"
+                             "uint16 imBpsMaker,uint16 premiumBps,uint40 expiry,uint64 nonce,bytes instrument)")
+DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+
+
+def _ws(base):
+    return base.replace("https://", "wss://").replace("http://", "ws://")
+
+
+def _body(r):
+    try:
+        b = r.json()
+    except ValueError:
+        raise RuntimeError(f"non-JSON from {r.url}: {r.text[:120]!r}") from None
+    if r.status_code >= 400:
+        raise RuntimeError(f"{r.status_code} {b}")
+    return b
+
+
+_chains = _body(requests.get(f"{BASE}/health", timeout=10))["chains"]
+_c = next(x for x in _chains if x["key"] == CHAIN)
+CHAIN_ID = _chains[0]["chain_id"]                    # the base chain id bound into the WS hello
+SEP = keccak(encode(["bytes32", "bytes32", "bytes32", "uint256", "address"],
+                    [DOMAIN_TYPEHASH, keccak(text="CRX"), keccak(text="rulebook-1.0"),
+                     _c["chain_id"], _c["core"]]))
+assert "0x" + SEP.hex() == _c["domain"], "domain mismatch, refuse to sign"
+
+
+def hello(nonce):
+    """The exact six line hello the gateway recovers the signer from, newline joined, no trailing newline."""
+    return "\n".join(["CRX-WS-LOGIN", "Audience: crx-gateway", f"Chain: {CHAIN_ID}",
+                      f"Custody: {CUSTODY}", f"Signer: {SIGNER.address.lower()}", f"Nonce: {nonce}"])
+
+
+async def ws_logon(ws):
+    """Read the challenge, sign the hello with SIGNER on CUSTODY's behalf, send the logon frame."""
+    challenge = json.loads(await ws.recv())
+    assert challenge.get("type") == "challenge", f"expected challenge, got {challenge.get('type')}"
+    sig = Account.sign_message(encode_defunct(text=hello(challenge["nonce"])), SIGNER.key).signature.to_0x_hex()
+    await ws.send(json.dumps({"type": "logon", "signer": SIGNER.address.lower(), "custody": CUSTODY, "sig": sig}))
+
 
 def taker_digest(rfq, q):
     """Rebuild the digest the maker signed, so the gateway's terms_hash is checked."""
@@ -25,13 +68,17 @@ def taker_digest(rfq, q):
         [TERMS_TYPEHASH, rfq["taker"], q["maker"], int(Decimal(rfq["notional"]).scaleb(6)),
          q["im_bps_taker"], q["im_bps_maker"], rfq["premium_bps"],
          q["expires_at"] // 1000, int(q["terms"]["nonce"]), keccak(blob)]))
-    return keccak(b"\x19\x01" + _separator(rfq["chain"]) + struct_hash)
+    return keccak(b"\x19\x01" + SEP + struct_hash)
+
+
+HDR = {"content-type": "application/json"}          # no auth header, the taker signature is the credential
+
 
 # nothing here completes without a maker quoting the same pair on the other side
 async def main():
     async with websockets.connect(_ws(BASE) + "/ws",
                                   ping_interval=20, ping_timeout=20) as ws:
-        await ws.send(json.dumps({"type": "logon", "token": token}))
+        await ws_logon(ws)
         ack = _body(requests.post(f"{BASE}/rfqs", headers=HDR, timeout=10, json={
             "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,
             "notional": NOTIONAL, "client_rfq_id": f"take-{uuid.uuid4().hex[:12]}"}))
@@ -47,7 +94,7 @@ async def main():
                 q = data["quote"]
                 digest = taker_digest(rfq, q)
                 assert q["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
-                sig = Account.unsafe_sign_hash(digest, ACCT.key).signature.to_0x_hex()
+                sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
                 _body(requests.post(f"{BASE}/rfqs/{rfq_id}/accept", headers=HDR,
                                     timeout=10, json={"quote_id": q["quote_id"], "sig_taker": sig}))
                 print("accepted", q["quote_id"])

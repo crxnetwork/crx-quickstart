@@ -1,32 +1,37 @@
-# catch.py: hold the socket until the first RFQ arrives. Needs CRX_MAKER_PK; it logs itself in.
+# catch.py: hold the socket until the first RFQ arrives. Needs CRX_SIGNER_PK + CRX_CUSTODY.
 import asyncio, json, os
 import requests, websockets
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
 BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
-ACCT = Account.from_key(os.environ["CRX_MAKER_PK"])
+SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])   # the hot key, signs the hello
+CUSTODY = os.environ["CRX_CUSTODY"].lower()              # the cold party the signer logs on for
+CHAIN_ID = requests.get(f"{BASE}/health", timeout=10).json()["chains"][0]["chain_id"]
 
 
 def _ws(base):
     return base.replace("https://", "wss://").replace("http://", "ws://")
 
 
-def login():
-    """Sign the gateway challenge for ACCT and return the session token."""
-    message = requests.get(f"{BASE}/auth/nonce", timeout=10,
-                           params={"address": ACCT.address.lower(), "chain": "base"}).json()["message"]
-    sig = Account.sign_message(encode_defunct(text=message), ACCT.key).signature.to_0x_hex()
-    return requests.post(f"{BASE}/auth/login", timeout=10,
-                         json={"address": ACCT.address.lower(), "sig": sig}).json()["token"]
+def hello(nonce):
+    """The exact six line hello the gateway recovers the signer from, newline joined, no trailing newline."""
+    return "\n".join(["CRX-WS-LOGIN", "Audience: crx-gateway", f"Chain: {CHAIN_ID}",
+                      f"Custody: {CUSTODY}", f"Signer: {SIGNER.address.lower()}", f"Nonce: {nonce}"])
+
+
+async def ws_logon(ws, nonce):
+    """Sign the hello with SIGNER on CUSTODY's behalf and send the logon frame."""
+    sig = Account.sign_message(encode_defunct(text=hello(nonce)), SIGNER.key).signature.to_0x_hex()
+    await ws.send(json.dumps({"type": "logon", "signer": SIGNER.address.lower(), "custody": CUSTODY, "sig": sig}))
 
 
 async def main():
-    token = login()
     async with websockets.connect(_ws(BASE) + "/ws") as ws:
-        await ws.send(json.dumps({"type": "logon", "token": token}))
         while True:
             frame = json.loads(await ws.recv())
+            if frame["type"] == "challenge":
+                await ws_logon(ws, frame["nonce"])
             if frame["type"] == "logon_ack":
                 d = frame["data"]
                 print("logged on as", d["account"], "role", d["role"], "- waiting for an RFQ")

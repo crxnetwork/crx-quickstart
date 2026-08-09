@@ -39,9 +39,9 @@ def _body(response):
 
 BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
 ROOT = BASE                                        # every path hangs off the host root
-ACCT = Account.from_key(os.environ["CRX_MAKER_PK"])
-HDR = {"content-type": "application/json"}          # login() fills in the Bearer header in place
-token = None                                        # the session JWT, set by login()
+SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])   # the hot key, was CRX_MAKER_PK. it signs everything
+CUSTODY = os.environ["CRX_CUSTODY"].lower()         # the cold party address, the maker the signer signs for
+HDR = {"content-type": "application/json"}          # quotes carry no auth header, the wallet signature is the credential
 
 
 def _ws(base):
@@ -49,25 +49,31 @@ def _ws(base):
     return base.replace("https://", "wss://").replace("http://", "ws://")
 
 
-def login():
-    """Prove ACCT's address by signing the gateway challenge, store the session token, and set HDR in place.
-
-    Mutates the module-level HDR dict — never rebinds it — so `from crx_maker import HDR` in another
-    module sees the Bearer header after login runs.
-    """
-    global token
-    message = _body(requests.get(f"{ROOT}/auth/nonce", timeout=10,
-                                 params={"address": ACCT.address.lower(), "chain": "base"}))["message"]
-    sig = Account.sign_message(encode_defunct(text=message), ACCT.key).signature.to_0x_hex()
-    body = _body(requests.post(f"{ROOT}/auth/login", timeout=10,
-                               json={"address": ACCT.address.lower(), "sig": sig}))
-    token = body["token"]
-    HDR.clear()
-    HDR.update({"Authorization": f"Bearer {token}", "content-type": "application/json"})
-    return token
+_health = _body(requests.get(f"{ROOT}/health", timeout=10))
+CHAINS = {c["key"]: c for c in _health["chains"]}
+PRIMARY_CHAIN_ID = _health["chains"][0]["chain_id"]   # the base chain id bound into the WS hello
 
 
-login()
+def hello(nonce, custody, signer, chain_id):
+    """The exact six line hello the gateway recovers the signer from, newline joined, no trailing newline."""
+    return "\n".join(["CRX-WS-LOGIN", "Audience: crx-gateway", f"Chain: {chain_id}",
+                      f"Custody: {custody}", f"Signer: {signer}", f"Nonce: {nonce}"])
+
+
+def login_frame(nonce, signer_acct, custody, chain_id):
+    """Sign the hello with signer_acct and return the logon frame the client sends back."""
+    sig = Account.sign_message(
+        encode_defunct(text=hello(nonce, custody, signer_acct.address.lower(), chain_id)),
+        signer_acct.key).signature.to_0x_hex()
+    return {"type": "logon", "signer": signer_acct.address.lower(), "custody": custody, "sig": sig}
+
+
+async def ws_logon(ws, nonce):
+    """Answer the gateway challenge over the socket: SIGNER signs the hello on CUSTODY's behalf."""
+    frame = login_frame(nonce, SIGNER, CUSTODY, PRIMARY_CHAIN_ID)
+    await ws.send(json.dumps(frame))
+    return frame
+
 
 TERMS_TYPE = ("Terms(address taker,address maker,uint256 notional,"
               "uint16 imBpsTaker,uint16 imBpsMaker,uint16 premiumBps,"
@@ -75,7 +81,6 @@ TERMS_TYPE = ("Terms(address taker,address maker,uint256 notional,"
 TERMS_TYPEHASH = keccak(text=TERMS_TYPE)
 DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,"
                               "uint256 chainId,address verifyingContract)")
-CHAINS = {c["key"]: c for c in _body(requests.get(f"{ROOT}/health", timeout=10))["chains"]}
 
 CANCEL_ABI = [{"type": "function", "name": "cancelQuote", "stateMutability": "nonpayable", "outputs": [],
                "inputs": [{"name": "t", "type": "tuple", "components": [
@@ -106,25 +111,30 @@ def _digest(rfq, rate, im_bps, expiry, cqid):
             + (rfq["settlement"] // 1000).to_bytes(5, "big")
             + int(Decimal(rate).scaleb(6)).to_bytes(8, "big"))
     nonce = int.from_bytes(
-        keccak(bytes.fromhex(ACCT.address[2:]) + cqid.encode())[-8:], "big")
+        keccak(bytes.fromhex(CUSTODY[2:]) + cqid.encode())[-8:], "big")
     struct_hash = keccak(encode(
         ["bytes32", "address", "address", "uint256", "uint16", "uint16",
          "uint16", "uint40", "uint64", "bytes32"],
-        [TERMS_TYPEHASH, rfq["taker"], ACCT.address,
+        [TERMS_TYPEHASH, rfq["taker"], CUSTODY,
          int(Decimal(rfq["notional"]).scaleb(6)),
          im_bps, im_bps, rfq["premium_bps"], expiry, nonce, keccak(blob)]))
     return keccak(b"\x19\x01" + _separator(rfq["chain"]) + struct_hash)
 
 
 def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
-    """Sign and submit one firm quote and return the gateway's quote object."""
+    """Sign and submit one firm quote and return the gateway's quote object.
+
+    The Terms bind maker=CUSTODY; SIGNER produces the signature. The gateway recovers the signer
+    and checks the (custody, signer) pair is whitelisted.
+    """
     cqid = client_quote_id or f"{rfq['pair']}.{rfq['rfq_id'][2:14]}"
     expiry = int(time.time()) + firm_for
     digest = _digest(rfq, rate, im_bps, expiry, cqid)
-    sig = Account.unsafe_sign_hash(digest, ACCT.key).signature.to_0x_hex()
-    assert Account._recover_hash(digest, signature=sig) == ACCT.address
+    sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
+    assert Account._recover_hash(digest, signature=sig) == SIGNER.address
     body = _body(requests.post(f"{BASE}/rfqs/{rfq['rfq_id']}/quotes", headers=HDR, timeout=10,
-                               json={"rate": rate, "im_bps_taker": im_bps, "im_bps_maker": im_bps,
+                               json={"maker": CUSTODY, "rate": rate,
+                                     "im_bps_taker": im_bps, "im_bps_maker": im_bps,
                                      "expires_at": expiry * 1000, "sig": sig,
                                      "client_quote_id": cqid}))
     assert body["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
@@ -132,28 +142,30 @@ def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
 
 
 def on_rfq(handler, *pairs):
-    """Block forever calling handler(rfq) per RFQ on the named pairs, resuming from the last seq after a drop."""
+    """Block forever calling handler(rfq) per RFQ on the named pairs, reconnecting with a backoff on a drop."""
     url = _ws(ROOT) + "/ws"
 
     async def run():
-        seq, backoff = None, 1
+        backoff = 1
         while True:
             try:
                 # pings keep a dead but open socket from looking alive forever
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    logon = {"type": "logon", "token": token}
-                    if seq is not None:
-                        logon["since"] = seq
-                    await ws.send(json.dumps(logon))
-                    print("logged on,", f"replaying after seq {seq}" if seq else "at the head")
+                    challenge = json.loads(await ws.recv())
+                    if challenge.get("type") != "challenge":
+                        print("expected a challenge, got", challenge.get("type"))
+                        return
+                    await ws_logon(ws, challenge["nonce"])
                     backoff = 1
                     async for raw in ws:
                         frame = json.loads(raw)
                         if frame["type"] == "error":
                             print("logon refused:", frame.get("data"))
                             return
-                        if frame.get("seq"):
-                            seq = frame["seq"]
+                        if frame["type"] == "logon_ack":
+                            d = frame["data"]
+                            print("logged on as", d["account"], "role", d["role"])
+                            continue
                         if frame["type"] != "rfq.opened":
                             continue
                         rfq = frame["data"]["rfq"]
@@ -184,18 +196,18 @@ def cancel_quote(terms):
     core = w3.eth.contract(address=os.environ["CRX_CORE"], abi=CANCEL_ABI)
     values = tuple(terms.values()) if isinstance(terms, dict) else tuple(terms)
     tx = core.functions.cancelQuote(values).build_transaction(
-        {"from": ACCT.address, "nonce": w3.eth.get_transaction_count(ACCT.address)})
-    sent = w3.eth.send_raw_transaction(ACCT.sign_transaction(tx).raw_transaction)
+        {"from": SIGNER.address, "nonce": w3.eth.get_transaction_count(SIGNER.address)})
+    sent = w3.eth.send_raw_transaction(SIGNER.sign_transaction(tx).raw_transaction)
     return sent.hex()
 
 
 def _submit_gateway_tx(w3, tx):
-    """Fill nonce and gas against CRX_RPC_URL, sign with ACCT, and wait for the receipt."""
-    txn = {"from": ACCT.address, "to": tx["to"], "data": tx["data"], "value": int(tx["value"]),
-           "chainId": tx["chain_id"], "nonce": w3.eth.get_transaction_count(ACCT.address),
+    """Fill nonce and gas against CRX_RPC_URL, sign with SIGNER, and wait for the receipt."""
+    txn = {"from": SIGNER.address, "to": tx["to"], "data": tx["data"], "value": int(tx["value"]),
+           "chainId": tx["chain_id"], "nonce": w3.eth.get_transaction_count(SIGNER.address),
            "gasPrice": w3.eth.gas_price}
     txn["gas"] = w3.eth.estimate_gas(txn)
-    sent = w3.eth.send_raw_transaction(ACCT.sign_transaction(txn).raw_transaction)
+    sent = w3.eth.send_raw_transaction(SIGNER.sign_transaction(txn).raw_transaction)
     w3.eth.wait_for_transaction_receipt(sent)
     return sent.hex()
 
