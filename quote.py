@@ -1,4 +1,4 @@
-# quote.py: the maker leg, run on a maker API key and the private key it is bound to
+# quote.py: the maker leg. No API key — the signer logs on with a signed hello, the whitelisted custody address is the credential
 from crx_maker import on_rfq, quote
 
 PAIR = "USDJPY"
