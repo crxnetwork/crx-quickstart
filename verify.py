@@ -8,7 +8,7 @@ from eth_account import Account
 from eth_utils import keccak
 
 import crx_maker
-from crx_maker import BASE, TERMS_TYPEHASH, _body, _separator, _ws, login_frame, quote
+from crx_maker import BASE, TERMS_TYPEHASH, _body, _separator, _ws, login_frame, quote, sign_rest
 
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
@@ -94,7 +94,9 @@ async def run():
                     digest = taker_digest(rfq, q)
                     assert q["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
                     sig = Account.unsafe_sign_hash(digest, taker.key).signature.to_0x_hex()
-                    _body(requests.post(f"{BASE}/rfqs/{rfq_id}/accept", headers=crx_maker.HDR, timeout=10,
+                    apath = f"/rfqs/{rfq_id}/accept"
+                    aheaders = {**crx_maker.HDR, **sign_rest("POST", apath, taker_custody, taker)}
+                    _body(requests.post(f"{BASE}{apath}", headers=aheaders, timeout=10,
                                         json={"quote_id": q["quote_id"], "sig_taker": sig}))
                     stage = "trade open"
                 if frame["type"] == "trade.opened" and data.get("rfq_id") == rfq_id:
@@ -104,7 +106,8 @@ async def run():
         async with websockets.connect(WS, ping_interval=20, ping_timeout=20) as taker_ws:
             await logon(taker_ws, taker, taker_custody)
             stage = "rfq open"
-            ack = _body(requests.post(f"{BASE}/rfqs", headers=crx_maker.HDR, timeout=10, json={
+            oheaders = {**crx_maker.HDR, **sign_rest("POST", "/rfqs", taker_custody, taker)}
+            ack = _body(requests.post(f"{BASE}/rfqs", headers=oheaders, timeout=10, json={
                 "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,
                 "notional": NOTIONAL, "client_rfq_id": f"verify-{uuid.uuid4().hex[:12]}"}))
             print("rfq", ack["rfq_id"])

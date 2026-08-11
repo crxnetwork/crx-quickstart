@@ -1,7 +1,7 @@
 """Copy this maker plumbing once."""
 __version__ = "1.0.0"
 
-import asyncio, json, os, time
+import asyncio, json, os, time, uuid
 from decimal import Decimal
 
 import requests, websockets
@@ -47,6 +47,27 @@ HDR = {"content-type": "application/json"}          # quotes carry no auth heade
 def _ws(base):
     """Map the REST scheme to the socket scheme, so loopback http becomes ws not wss."""
     return base.replace("https://", "wss://").replace("http://", "ws://")
+
+
+def sign_rest(method, path, custody, signer_acct, nonce=None):
+    """Build the five signed headers every authed REST call carries.
+
+    signer_acct signs the canonical CRX-REST-LOGIN message, EIP-191 personal_sign, newline
+    joined with no trailing newline, byte-identical to the gateway's rest_login_message:
+    method uppercased, path with no query, custody and signer lowercase 0x, timestamp unix ms.
+    The gateway recovers the signer, requires it equal x-crx-signer, then authorizes the
+    (custody, signer) pair and derives the role from the on-chain whitelist.
+    """
+    ts = int(time.time() * 1000)
+    nonce = nonce or uuid.uuid4().hex
+    custody = custody.lower()
+    signer = signer_acct.address.lower()
+    msg = "\n".join(["CRX-REST-LOGIN", "Audience: crx-gateway", f"Method: {method.upper()}",
+                     f"Path: {path}", f"Custody: {custody}", f"Signer: {signer}",
+                     f"Timestamp: {ts}", f"Nonce: {nonce}"])
+    sig = Account.sign_message(encode_defunct(text=msg), signer_acct.key).signature.to_0x_hex()
+    return {"x-crx-address": custody, "x-crx-signer": signer, "x-crx-ts": str(ts),
+            "x-crx-nonce": nonce, "x-crx-sig": sig}
 
 
 _health = _body(requests.get(f"{ROOT}/health", timeout=10))
@@ -132,7 +153,9 @@ def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
     digest = _digest(rfq, rate, im_bps, expiry, cqid)
     sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
     assert Account._recover_hash(digest, signature=sig) == SIGNER.address
-    body = _body(requests.post(f"{BASE}/rfqs/{rfq['rfq_id']}/quotes", headers=HDR, timeout=10,
+    path = f"/rfqs/{rfq['rfq_id']}/quotes"
+    headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
+    body = _body(requests.post(f"{BASE}{path}", headers=headers, timeout=10,
                                json={"maker": CUSTODY, "rate": rate,
                                      "im_bps_taker": im_bps, "im_bps_maker": im_bps,
                                      "expires_at": expiry * 1000, "sig": sig,
@@ -214,7 +237,9 @@ def _submit_gateway_tx(w3, tx):
 
 def _gateway_flow(endpoint, payload):
     """POST to the gateway root, then sign and submit each returned tx in order."""
-    body = _body(requests.post(f"{ROOT}/{endpoint}", headers=HDR, timeout=10, json=payload))
+    path = f"/{endpoint}"
+    headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
+    body = _body(requests.post(f"{ROOT}{path}", headers=headers, timeout=10, json=payload))
     w3 = _w3()
     return [_submit_gateway_tx(w3, tx) for tx in body["transactions"]]
 

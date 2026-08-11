@@ -71,7 +71,26 @@ def taker_digest(rfq, q):
     return keccak(b"\x19\x01" + SEP + struct_hash)
 
 
-HDR = {"content-type": "application/json"}          # no auth header, the taker signature is the credential
+HDR = {"content-type": "application/json"}          # content type only; sign_rest adds the credential
+
+
+def sign_rest(method, path, custody, signer_acct, nonce=None):
+    """The five signed headers every authed REST call carries, byte-identical to the gateway.
+
+    signer_acct signs the canonical CRX-REST-LOGIN message (EIP-191 personal_sign, newline
+    joined, no trailing newline): method uppercased, path with no query, custody and signer
+    lowercase 0x, timestamp unix ms.
+    """
+    ts = int(time.time() * 1000)
+    nonce = nonce or uuid.uuid4().hex
+    custody = custody.lower()
+    signer = signer_acct.address.lower()
+    msg = "\n".join(["CRX-REST-LOGIN", "Audience: crx-gateway", f"Method: {method.upper()}",
+                     f"Path: {path}", f"Custody: {custody}", f"Signer: {signer}",
+                     f"Timestamp: {ts}", f"Nonce: {nonce}"])
+    sig = Account.sign_message(encode_defunct(text=msg), signer_acct.key).signature.to_0x_hex()
+    return {"x-crx-address": custody, "x-crx-signer": signer, "x-crx-ts": str(ts),
+            "x-crx-nonce": nonce, "x-crx-sig": sig}
 
 
 # nothing here completes without a maker quoting the same pair on the other side
@@ -79,7 +98,8 @@ async def main():
     async with websockets.connect(_ws(BASE) + "/ws",
                                   ping_interval=20, ping_timeout=20) as ws:
         await ws_logon(ws)
-        ack = _body(requests.post(f"{BASE}/rfqs", headers=HDR, timeout=10, json={
+        oheaders = {**HDR, **sign_rest("POST", "/rfqs", CUSTODY, SIGNER)}
+        ack = _body(requests.post(f"{BASE}/rfqs", headers=oheaders, timeout=10, json={
             "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,
             "notional": NOTIONAL, "client_rfq_id": f"take-{uuid.uuid4().hex[:12]}"}))
         rfq_id, rfq = ack["rfq_id"], None
@@ -95,7 +115,9 @@ async def main():
                 digest = taker_digest(rfq, q)
                 assert q["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
                 sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
-                _body(requests.post(f"{BASE}/rfqs/{rfq_id}/accept", headers=HDR,
+                apath = f"/rfqs/{rfq_id}/accept"
+                aheaders = {**HDR, **sign_rest("POST", apath, CUSTODY, SIGNER)}
+                _body(requests.post(f"{BASE}{apath}", headers=aheaders,
                                     timeout=10, json={"quote_id": q["quote_id"], "sig_taker": sig}))
                 print("accepted", q["quote_id"])
             if frame["type"] == "trade.opened" and data["rfq_id"] == rfq_id:
