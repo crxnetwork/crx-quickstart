@@ -36,7 +36,7 @@ async def main():
                 print("logon refused:", frame.get("data"))
                 return
             if frame["type"] == "rfq.opened":
-                r = frame["data"]["rfq"]
+                r = frame["data"]
                 print("rfq_id:", r["rfq_id"])
                 print(r["pair"], r["side"], "notional", r["notional"], "settlement", r["settlement"])
                 return

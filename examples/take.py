@@ -14,8 +14,10 @@ CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
 
 TERMS_TYPEHASH = keccak(text="Terms(address taker,address maker,uint256 notional,uint16 imBpsTaker,"
-                             "uint16 imBpsMaker,uint16 premiumBps,uint40 expiry,uint64 nonce,bytes instrument)")
+                             "uint16 imBpsMaker,int16 premiumBps,uint40 expiry,uint64 nonce,"
+                             "uint8 instrumentId,bytes32 pair,int8 side,uint40 settlement,uint64 rate)")
 DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+NDF = 1  # instrumentId for the non-deliverable forward
 
 
 def _ws(base):
@@ -54,16 +56,15 @@ async def ws_logon(ws):
 
 
 def taker_digest(rfq, q):
-    blob = (b"\x01" + bytes.fromhex(rfq["pair_id"][2:])
-            + ((1 if rfq["side"] == "buy" else -1) & 0xFF).to_bytes(1, "big")
-            + (rfq["settlement"] // 1000).to_bytes(5, "big")
-            + int(Decimal(q["rate"]).scaleb(6)).to_bytes(8, "big"))
+    side = 1 if rfq["side"] == "buy" else -1
     struct_hash = keccak(encode(
-        ["bytes32", "address", "address", "uint256", "uint16", "uint16",
-         "uint16", "uint40", "uint64", "bytes32"],
+        ["bytes32", "address", "address", "uint256", "uint16", "uint16", "int16",
+         "uint40", "uint64", "uint8", "bytes32", "int8", "uint40", "uint64"],
         [TERMS_TYPEHASH, rfq["taker"], q["maker"], int(Decimal(rfq["notional"]).scaleb(6)),
          q["im_bps_taker"], q["im_bps_maker"], rfq["premium_bps"],
-         q["expires_at"] // 1000, int(q["terms"]["nonce"]), keccak(blob)]))
+         q["expires_at"] // 1000, int(q["nonce"]), NDF,
+         bytes.fromhex(rfq["pair_id"][2:]), side, rfq["settlement"] // 1000,
+         int(Decimal(q["rate"]).scaleb(6))]))
     return keccak(b"\x19\x01" + SEP + struct_hash)
 
 
@@ -96,10 +97,10 @@ async def main():
         async for raw in ws:
             frame = json.loads(raw)
             data = frame.get("data") or {}
-            if frame["type"] == "rfq.opened" and data["rfq"]["rfq_id"] == rfq_id:
-                rfq = data["rfq"]
-            if rfq and frame["type"] == "rfq.quoted" and data["quote"]["rfq_id"] == rfq_id:
-                q = data["quote"]
+            if frame["type"] == "rfq.opened" and data["rfq_id"] == rfq_id:
+                rfq = data
+            if rfq and frame["type"] == "rfq.quoted" and data["rfq_id"] == rfq_id:
+                q = data
                 digest = taker_digest(rfq, q)
                 assert q["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
                 sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()

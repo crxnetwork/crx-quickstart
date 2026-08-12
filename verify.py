@@ -7,7 +7,8 @@ from eth_account import Account
 from eth_utils import keccak
 
 import crx_maker
-from crx_maker import BASE, TERMS_TYPEHASH, _body, _separator, _ws, login_frame, quote, sign_rest
+from crx_maker import (BASE, NDF, TERMS_ABI_TYPES, TERMS_TYPEHASH, _body, _separator, _ws,
+                       login_frame, quote, sign_rest)
 
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
 SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
@@ -31,16 +32,14 @@ async def logon(ws, signer_acct, custody):
 
 
 def taker_digest(rfq, q):
-    blob = (b"\x01" + bytes.fromhex(rfq["pair_id"][2:])
-            + ((1 if rfq["side"] == "buy" else -1) & 0xFF).to_bytes(1, "big")
-            + (rfq["settlement"] // 1000).to_bytes(5, "big")
-            + int(Decimal(q["rate"]).scaleb(6)).to_bytes(8, "big"))
+    side = 1 if rfq["side"] == "buy" else -1
     struct_hash = keccak(encode(
-        ["bytes32", "address", "address", "uint256", "uint16", "uint16",
-         "uint16", "uint40", "uint64", "bytes32"],
+        TERMS_ABI_TYPES,
         [TERMS_TYPEHASH, rfq["taker"], q["maker"], int(Decimal(rfq["notional"]).scaleb(6)),
          q["im_bps_taker"], q["im_bps_maker"], rfq["premium_bps"],
-         q["expires_at"] // 1000, int(q["terms"]["nonce"]), keccak(blob)]))
+         q["expires_at"] // 1000, int(q["nonce"]), NDF,
+         bytes.fromhex(rfq["pair_id"][2:]), side, rfq["settlement"] // 1000,
+         int(Decimal(q["rate"]).scaleb(6))]))
     return keccak(b"\x19\x01" + _separator(rfq["chain"]) + struct_hash)
 
 
@@ -48,9 +47,9 @@ async def maker_leg(ws, rfq_id):
     global stage
     async for raw in ws:
         frame = json.loads(raw)
-        if frame["type"] == "rfq.opened" and frame["data"]["rfq"]["rfq_id"] == rfq_id:
+        if frame["type"] == "rfq.opened" and frame["data"]["rfq_id"] == rfq_id:
             stage = "maker quote"
-            q = quote(frame["data"]["rfq"], rate="146.250000", im_bps=292, firm_for=60)
+            q = quote(frame["data"], rate="146.250000", im_bps=292, firm_for=60)
             print("quoted", q["quote_id"])
             return
 
@@ -79,10 +78,10 @@ async def run():
             async for raw in ws:
                 frame = json.loads(raw)
                 data = frame.get("data") or {}
-                if frame["type"] == "rfq.opened" and data["rfq"]["rfq_id"] == rfq_id:
-                    rfq = data["rfq"]
-                if rfq and frame["type"] == "rfq.quoted" and data["quote"]["rfq_id"] == rfq_id:
-                    q = data["quote"]
+                if frame["type"] == "rfq.opened" and data["rfq_id"] == rfq_id:
+                    rfq = data
+                if rfq and frame["type"] == "rfq.quoted" and data["rfq_id"] == rfq_id:
+                    q = data
                     if q["maker"].lower() != crx_maker.CUSTODY:
                         continue
                     stage = "taker accept"

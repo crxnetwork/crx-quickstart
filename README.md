@@ -101,7 +101,7 @@ python3 verify.py
 
 Run them from the repo root, `python3 examples/catch.py`.
 
-- `examples/verify_signing.py`: run first, recomputing the nonce, instrument, domain separator, struct hash, terms_hash, and signature against the fixed fixture on [the signing page](https://portal.crxfx.com/docs/api/signing). No network, no env.
+- `examples/verify_signing.py`: run first, recomputing the nonce, pair, domain separator, struct hash, terms_hash, and signature against the fixed fixture on [the signing page](https://portal.crxfx.com/docs/api/signing). No network, no env.
 - `examples/catch.py`: hold the socket, print the logon ack, then the first RFQ. Needs `CRX_SIGNER_PK`, `CRX_CUSTODY`.
 - `examples/take.py`: open an RFQ, rebuild and sign the maker's Terms off `rfq.opened`, accept, and hold for the fill. Self-contained taker. Needs `CRX_TAKER_SIGNER_PK`, `CRX_TAKER_CUSTODY`.
 - `examples/sign.py`: build and sign the Terms digest for a sample RFQ through `crx_maker` internals, with no `quote()` call. Needs `CRX_SIGNER_PK`, `CRX_CUSTODY`, because importing `crx_maker` pulls the live domain off `/health`.

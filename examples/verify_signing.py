@@ -5,8 +5,9 @@ from eth_account import Account
 from eth_utils import keccak
 
 TERMS_TYPE = ("Terms(address taker,address maker,uint256 notional,"
-              "uint16 imBpsTaker,uint16 imBpsMaker,uint16 premiumBps,"
-              "uint40 expiry,uint64 nonce,bytes instrument)")
+              "uint16 imBpsTaker,uint16 imBpsMaker,int16 premiumBps,"
+              "uint40 expiry,uint64 nonce,uint8 instrumentId,bytes32 pair,"
+              "int8 side,uint40 settlement,uint64 rate)")
 TERMS_TYPEHASH = keccak(text=TERMS_TYPE)
 DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,"
                               "uint256 chainId,address verifyingContract)")
@@ -22,19 +23,19 @@ PREMIUM_BPS = 15
 EXPIRY = 1789990000
 CLIENT_QUOTE_ID = "q-001"
 PAIR_TEXT = "USD/JPY"
-SIDE = 1
+INSTRUMENT_ID = 1          # non-deliverable forward
+SIDE = 1                   # +1 buy, -1 sell
 SETTLEMENT_MS = 1790000000000
 RATE_SCALED = int(Decimal("156.4321").scaleb(6))
 ANVIL_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 
-EXPECT_INSTRUMENT = "0x0135b8bafff3570683af968b8d36b91b1a19465141d9712425e9f76c68ff8cb15201006ab13b80000000000952f6e4"
-EXPECT_KECCAK_INSTR = "0x6d948f925ce346f204fd7a0133a56bed3bbeec98f156e88747da479f949aa671"
+EXPECT_PAIR = "0x35b8bafff3570683af968b8d36b91b1a19465141d9712425e9f76c68ff8cb152"
 EXPECT_DOMAIN_SEP = "0x2ab09df26fbdc3158d4e0588e388b6805f375822b6ee336a2234c1993a811e83"
 EXPECT_NONCE = 10340973521660193082
-EXPECT_STRUCT_HASH = "0x2b9338f9459c6474129e4c4efca4eed422d4bb3d05a93e9c6ad36a551221b1ec"
-EXPECT_TERMS_HASH = "0x637a4ad24405a410bdf315c2f8e999381b3136303d99e546701127fc8bfd4712"
-EXPECT_SIG = ("0x9e28154d2bfcb26a912d9c93d80eb49cca709945f1013690683cd83952ea23994585e850687547fe2f8"
-              "33670bcb99ceaa016615ea5768af276221f7d49daaa611c")
+EXPECT_STRUCT_HASH = "0x7b91ff86960ec7f338facc953b11c19b0c1d7904aea865f4387c5fb5a65ed1b6"
+EXPECT_TERMS_HASH = "0x2e8b63d6d5588a2d80c76f6c7816cf8e106494552a8c823276ac1b755a09cd45"
+EXPECT_SIG = ("0x5dd947ff43b1b51f004f8e66790c334b495c1b9b6184c4885025009fc5289a00"
+              "2bfb80879835fb0b80b6d9616d317e29f8ecfc6f664db774335d5434751183581c")
 
 
 def check(label, got, want):
@@ -49,14 +50,8 @@ def main():
     assert nonce == EXPECT_NONCE, f"nonce: got {nonce}, want {EXPECT_NONCE}"
     print("ok", "nonce", nonce)
 
-    pair_id = keccak(text=PAIR_TEXT)
-    instrument = (b"\x01" + pair_id + (SIDE & 0xFF).to_bytes(1, "big")
-                  + (SETTLEMENT_MS // 1000).to_bytes(5, "big") + RATE_SCALED.to_bytes(8, "big"))
-    assert len(instrument) == 47, f"instrument length: got {len(instrument)}, want 47"
-    check("instrument", instrument, EXPECT_INSTRUMENT)
-
-    keccak_instr = keccak(instrument)
-    check("keccak(instrument)", keccak_instr, EXPECT_KECCAK_INSTR)
+    pair = keccak(text=PAIR_TEXT)
+    check("pair", pair, EXPECT_PAIR)
 
     domain_sep = keccak(encode(
         ["bytes32", "bytes32", "bytes32", "uint256", "address"],
@@ -65,10 +60,11 @@ def main():
     check("domainSeparator", domain_sep, EXPECT_DOMAIN_SEP)
 
     struct_hash = keccak(encode(
-        ["bytes32", "address", "address", "uint256", "uint16", "uint16",
-         "uint16", "uint40", "uint64", "bytes32"],
+        ["bytes32", "address", "address", "uint256", "uint16", "uint16", "int16",
+         "uint40", "uint64", "uint8", "bytes32", "int8", "uint40", "uint64"],
         [TERMS_TYPEHASH, TAKER, MAKER, NOTIONAL, IM_BPS_TAKER, IM_BPS_MAKER,
-         PREMIUM_BPS, EXPIRY, nonce, keccak_instr]))
+         PREMIUM_BPS, EXPIRY, nonce, INSTRUMENT_ID, pair, SIDE,
+         SETTLEMENT_MS // 1000, RATE_SCALED]))
     check("structHash", struct_hash, EXPECT_STRUCT_HASH)
 
     terms_hash = keccak(b"\x19\x01" + domain_sep + struct_hash)

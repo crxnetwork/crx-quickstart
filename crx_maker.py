@@ -81,20 +81,28 @@ async def ws_logon(ws, nonce):
 
 
 TERMS_TYPE = ("Terms(address taker,address maker,uint256 notional,"
-              "uint16 imBpsTaker,uint16 imBpsMaker,uint16 premiumBps,"
-              "uint40 expiry,uint64 nonce,bytes instrument)")
+              "uint16 imBpsTaker,uint16 imBpsMaker,int16 premiumBps,"
+              "uint40 expiry,uint64 nonce,uint8 instrumentId,bytes32 pair,"
+              "int8 side,uint40 settlement,uint64 rate)")
 TERMS_TYPEHASH = keccak(text=TERMS_TYPE)
 DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,"
                               "uint256 chainId,address verifyingContract)")
+
+# ABI head types for the flat Terms struct hash, aligned to TERMS_TYPE.
+TERMS_ABI_TYPES = ["bytes32", "address", "address", "uint256", "uint16", "uint16", "int16",
+                   "uint40", "uint64", "uint8", "bytes32", "int8", "uint40", "uint64"]
+NDF = 1  # instrumentId for the non-deliverable forward
 
 CANCEL_ABI = [{"type": "function", "name": "cancelQuote", "stateMutability": "nonpayable", "outputs": [],
                "inputs": [{"name": "t", "type": "tuple", "components": [
                    {"name": "taker", "type": "address"}, {"name": "maker", "type": "address"},
                    {"name": "notional", "type": "uint256"},
                    {"name": "imBpsTaker", "type": "uint16"}, {"name": "imBpsMaker", "type": "uint16"},
-                   {"name": "premiumBps", "type": "uint16"},
+                   {"name": "premiumBps", "type": "int16"},
                    {"name": "expiry", "type": "uint40"}, {"name": "nonce", "type": "uint64"},
-                   {"name": "instrument", "type": "bytes"}]}]}]
+                   {"name": "instrumentId", "type": "uint8"}, {"name": "pair", "type": "bytes32"},
+                   {"name": "side", "type": "int8"}, {"name": "settlement", "type": "uint40"},
+                   {"name": "rate", "type": "uint64"}]}]}]
 
 
 def _separator(chain_key):
@@ -108,19 +116,15 @@ def _separator(chain_key):
 
 def _digest(rfq, rate, im_bps, expiry, cqid):
     side = 1 if rfq["side"] == "buy" else -1
-    blob = (b"\x01"
-            + bytes.fromhex(rfq["pair_id"][2:])
-            + (side & 0xFF).to_bytes(1, "big")
-            + (rfq["settlement"] // 1000).to_bytes(5, "big")
-            + int(Decimal(rate).scaleb(6)).to_bytes(8, "big"))
     nonce = int.from_bytes(
         keccak(bytes.fromhex(CUSTODY[2:]) + cqid.encode())[-8:], "big")
     struct_hash = keccak(encode(
-        ["bytes32", "address", "address", "uint256", "uint16", "uint16",
-         "uint16", "uint40", "uint64", "bytes32"],
+        TERMS_ABI_TYPES,
         [TERMS_TYPEHASH, rfq["taker"], CUSTODY,
          int(Decimal(rfq["notional"]).scaleb(6)),
-         im_bps, im_bps, rfq["premium_bps"], expiry, nonce, keccak(blob)]))
+         im_bps, im_bps, rfq["premium_bps"], expiry, nonce, NDF,
+         bytes.fromhex(rfq["pair_id"][2:]), side, rfq["settlement"] // 1000,
+         int(Decimal(rate).scaleb(6))]))
     return keccak(b"\x19\x01" + _separator(rfq["chain"]) + struct_hash)
 
 
@@ -166,7 +170,7 @@ def on_rfq(handler, *pairs):
                             continue
                         if frame["type"] != "rfq.opened":
                             continue
-                        rfq = frame["data"]["rfq"]
+                        rfq = frame["data"]
                         if pairs and rfq["pair"] not in pairs:
                             continue
                         try:
