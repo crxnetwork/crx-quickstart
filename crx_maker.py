@@ -39,9 +39,9 @@ def _body(response):
 
 BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
 ROOT = BASE                                        # every path hangs off the host root
-SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])   # the hot key, was CRX_MAKER_PK. it signs everything
-CUSTODY = os.environ["CRX_CUSTODY"].lower()         # the cold party address, the maker the signer signs for
-HDR = {"content-type": "application/json"}          # quotes carry no auth header, the wallet signature is the credential
+SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])   # the hot key, signs everything
+CUSTODY = os.environ["CRX_CUSTODY"].lower()         # the cold party the signer signs for
+HDR = {"content-type": "application/json"}          # content type only; sign_rest adds the credential
 
 
 def _ws(base):
