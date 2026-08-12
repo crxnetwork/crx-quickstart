@@ -5,7 +5,7 @@
 Python 3.9 or newer.
 
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 
 cp .env.example .env        # fill in CRX_SIGNER_PK and CRX_CUSTODY
 set -a; . ./.env; set +a    # a missing name fails at import as KeyError: 'CRX_SIGNER_PK'
