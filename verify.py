@@ -1,4 +1,3 @@
-# verify.py: one process proving the round trip, connectivity only without taker creds
 import asyncio, json, os, sys, time, uuid
 from decimal import Decimal
 
@@ -17,7 +16,6 @@ stage = "health"
 
 
 async def logon(ws, signer_acct, custody):
-    """Read the challenge, sign the hello with signer_acct on custody's behalf, return the logon_ack data."""
     challenge = json.loads(await ws.recv())
     if challenge.get("type") != "challenge":
         print(f"FAIL at {stage}: expected challenge, got", challenge)
@@ -33,7 +31,6 @@ async def logon(ws, signer_acct, custody):
 
 
 def taker_digest(rfq, q):
-    """Rebuild the digest the maker signed, so the gateway's terms_hash is checked."""
     blob = (b"\x01" + bytes.fromhex(rfq["pair_id"][2:])
             + ((1 if rfq["side"] == "buy" else -1) & 0xFF).to_bytes(1, "big")
             + (rfq["settlement"] // 1000).to_bytes(5, "big")
@@ -82,12 +79,10 @@ async def run():
             async for raw in ws:
                 frame = json.loads(raw)
                 data = frame.get("data") or {}
-                # every fact the Terms digest needs arrives on rfq.opened
                 if frame["type"] == "rfq.opened" and data["rfq"]["rfq_id"] == rfq_id:
                     rfq = data["rfq"]
                 if rfq and frame["type"] == "rfq.quoted" and data["quote"]["rfq_id"] == rfq_id:
                     q = data["quote"]
-                    # the live solver may also quote, so only this maker's custody is accepted
                     if q["maker"].lower() != crx_maker.CUSTODY:
                         continue
                     stage = "taker accept"

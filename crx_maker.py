@@ -1,4 +1,3 @@
-"""Copy this maker plumbing once."""
 __version__ = "1.0.0"
 
 import asyncio, json, os, time, uuid
@@ -13,19 +12,16 @@ from web3 import Web3
 
 
 class CrxError(Exception):
-    """A gateway refusal carrying a stable `code` slug and a `message` that is prose and moves."""
 
     def __init__(self, status, body):
         body = body if isinstance(body, dict) else {}
         self.status = status
         self.code = body.get("code") or "unknown"
-        # REST bodies use the error key where stream error frames use message
         self.message = body.get("error") or body.get("message") or ""
         super().__init__(f"{status} {self.code}" + (f": {self.message}" if self.message else ""))
 
 
 def _body(response):
-    """Return the parsed body, or raise CrxError naming the host behind a non-JSON reply."""
     try:
         body = response.json()
     except ValueError:
@@ -38,26 +34,17 @@ def _body(response):
 
 
 BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
-ROOT = BASE                                        # every path hangs off the host root
-SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])   # the hot key, signs everything
-CUSTODY = os.environ["CRX_CUSTODY"].lower()         # the cold party the signer signs for
-HDR = {"content-type": "application/json"}          # content type only; sign_rest adds the credential
+ROOT = BASE
+SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])
+CUSTODY = os.environ["CRX_CUSTODY"].lower()
+HDR = {"content-type": "application/json"}
 
 
 def _ws(base):
-    """Map the REST scheme to the socket scheme, so loopback http becomes ws not wss."""
     return base.replace("https://", "wss://").replace("http://", "ws://")
 
 
 def sign_rest(method, path, custody, signer_acct, nonce=None):
-    """Build the five signed headers every authed REST call carries.
-
-    signer_acct signs the canonical CRX-REST-LOGIN message, EIP-191 personal_sign, newline
-    joined with no trailing newline, byte-identical to the gateway's rest_login_message:
-    method uppercased, path with no query, custody and signer lowercase 0x, timestamp unix ms.
-    The gateway recovers the signer, requires it equal x-crx-signer, then authorizes the
-    (custody, signer) pair and derives the role from the on-chain whitelist.
-    """
     ts = int(time.time() * 1000)
     nonce = nonce or uuid.uuid4().hex
     custody = custody.lower()
@@ -72,17 +59,15 @@ def sign_rest(method, path, custody, signer_acct, nonce=None):
 
 _health = _body(requests.get(f"{ROOT}/health", timeout=10))
 CHAINS = {c["key"]: c for c in _health["chains"]}
-PRIMARY_CHAIN_ID = _health["chains"][0]["chain_id"]   # the base chain id bound into the WS hello
+PRIMARY_CHAIN_ID = _health["chains"][0]["chain_id"]
 
 
 def hello(nonce, custody, signer, chain_id):
-    """The exact six line hello the gateway recovers the signer from, newline joined, no trailing newline."""
     return "\n".join(["CRX-WS-LOGIN", "Audience: crx-gateway", f"Chain: {chain_id}",
                       f"Custody: {custody}", f"Signer: {signer}", f"Nonce: {nonce}"])
 
 
 def login_frame(nonce, signer_acct, custody, chain_id):
-    """Sign the hello with signer_acct and return the logon frame the client sends back."""
     sig = Account.sign_message(
         encode_defunct(text=hello(nonce, custody, signer_acct.address.lower(), chain_id)),
         signer_acct.key).signature.to_0x_hex()
@@ -90,7 +75,6 @@ def login_frame(nonce, signer_acct, custody, chain_id):
 
 
 async def ws_logon(ws, nonce):
-    """Answer the gateway challenge over the socket: SIGNER signs the hello on CUSTODY's behalf."""
     frame = login_frame(nonce, SIGNER, CUSTODY, PRIMARY_CHAIN_ID)
     await ws.send(json.dumps(frame))
     return frame
@@ -118,14 +102,12 @@ def _separator(chain_key):
     sep = keccak(encode(["bytes32", "bytes32", "bytes32", "uint256", "address"],
                         [DOMAIN_TYPEHASH, keccak(text="CRX"), keccak(text="rulebook-1.0"),
                          c["chain_id"], c["core"]]))
-    # the assert stops a signature being made against a rotated core under a stale domain
     assert "0x" + sep.hex() == c["domain"], f"domain does not match {chain_key}, refuse to sign"
     return sep
 
 
 def _digest(rfq, rate, im_bps, expiry, cqid):
     side = 1 if rfq["side"] == "buy" else -1
-    # the wire carries settlement and expiry in unix ms while the signed u40 fields pack seconds
     blob = (b"\x01"
             + bytes.fromhex(rfq["pair_id"][2:])
             + (side & 0xFF).to_bytes(1, "big")
@@ -143,11 +125,6 @@ def _digest(rfq, rate, im_bps, expiry, cqid):
 
 
 def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
-    """Sign and submit one firm quote and return the gateway's quote object.
-
-    The Terms bind maker=CUSTODY; SIGNER produces the signature. The gateway recovers the signer
-    and checks the (custody, signer) pair is whitelisted.
-    """
     cqid = client_quote_id or f"{rfq['pair']}.{rfq['rfq_id'][2:14]}"
     expiry = int(time.time()) + firm_for
     digest = _digest(rfq, rate, im_bps, expiry, cqid)
@@ -165,14 +142,12 @@ def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
 
 
 def on_rfq(handler, *pairs):
-    """Block forever calling handler(rfq) per RFQ on the named pairs, reconnecting with a backoff on a drop."""
     url = _ws(ROOT) + "/ws"
 
     async def run():
         backoff = 1
         while True:
             try:
-                # pings keep a dead but open socket from looking alive forever
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
                     challenge = json.loads(await ws.recv())
                     if challenge.get("type") != "challenge":
@@ -214,7 +189,6 @@ def _w3():
 
 
 def cancel_quote(terms):
-    """Cancel a firm quote before it opens, taking the signed nine field Terms as a dict or tuple in field order."""
     w3 = _w3()
     core = w3.eth.contract(address=os.environ["CRX_CORE"], abi=CANCEL_ABI)
     values = tuple(terms.values()) if isinstance(terms, dict) else tuple(terms)
@@ -225,7 +199,6 @@ def cancel_quote(terms):
 
 
 def _submit_gateway_tx(w3, tx):
-    """Fill nonce and gas against CRX_RPC_URL, sign with SIGNER, and wait for the receipt."""
     txn = {"from": SIGNER.address, "to": tx["to"], "data": tx["data"], "value": int(tx["value"]),
            "chainId": tx["chain_id"], "nonce": w3.eth.get_transaction_count(SIGNER.address),
            "gasPrice": w3.eth.gas_price}
@@ -236,7 +209,6 @@ def _submit_gateway_tx(w3, tx):
 
 
 def _gateway_flow(endpoint, payload):
-    """POST to the gateway root, then sign and submit each returned tx in order."""
     path = f"/{endpoint}"
     headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
     body = _body(requests.post(f"{ROOT}{path}", headers=headers, timeout=10, json=payload))
@@ -245,11 +217,9 @@ def _gateway_flow(endpoint, payload):
 
 
 def deposit(chain, symbol, amount):
-    """Submit the unsigned txs POST /deposit returns, an approve first when allowance falls short."""
     return _gateway_flow("deposit", {"chain": chain, "symbol": symbol, "amount": amount})
 
 
 def withdraw(chain, symbol, amount, recipient):
-    """Submit the unsigned tx POST /withdraw returns, which passes only if required IM stays covered after."""
     return _gateway_flow("withdraw",
                           {"chain": chain, "symbol": symbol, "amount": amount, "recipient": recipient})

@@ -1,4 +1,3 @@
-# take.py: the taker leg. Opens an RFQ, signs the maker's Terms to accept. Needs CRX_TAKER_SIGNER_PK + CRX_TAKER_CUSTODY.
 import asyncio, json, os, time, uuid
 from decimal import Decimal
 
@@ -9,10 +8,10 @@ from eth_account.messages import encode_defunct
 from eth_utils import keccak
 
 BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
-SIGNER = Account.from_key(os.environ["CRX_TAKER_SIGNER_PK"])   # the taker hot key, signs everything
-CUSTODY = os.environ["CRX_TAKER_CUSTODY"].lower()             # the taker cold party address
-CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"   # notional is a string
-SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000               # the wire carries unix ms
+SIGNER = Account.from_key(os.environ["CRX_TAKER_SIGNER_PK"])
+CUSTODY = os.environ["CRX_TAKER_CUSTODY"].lower()
+CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
+SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
 
 TERMS_TYPEHASH = keccak(text="Terms(address taker,address maker,uint256 notional,uint16 imBpsTaker,"
                              "uint16 imBpsMaker,uint16 premiumBps,uint40 expiry,uint64 nonce,bytes instrument)")
@@ -35,7 +34,7 @@ def _body(r):
 
 _chains = _body(requests.get(f"{BASE}/health", timeout=10))["chains"]
 _c = next(x for x in _chains if x["key"] == CHAIN)
-CHAIN_ID = _chains[0]["chain_id"]                    # the base chain id bound into the WS hello
+CHAIN_ID = _chains[0]["chain_id"]
 SEP = keccak(encode(["bytes32", "bytes32", "bytes32", "uint256", "address"],
                     [DOMAIN_TYPEHASH, keccak(text="CRX"), keccak(text="rulebook-1.0"),
                      _c["chain_id"], _c["core"]]))
@@ -43,13 +42,11 @@ assert "0x" + SEP.hex() == _c["domain"], "domain mismatch, refuse to sign"
 
 
 def hello(nonce):
-    """The exact six line hello the gateway recovers the signer from, newline joined, no trailing newline."""
     return "\n".join(["CRX-WS-LOGIN", "Audience: crx-gateway", f"Chain: {CHAIN_ID}",
                       f"Custody: {CUSTODY}", f"Signer: {SIGNER.address.lower()}", f"Nonce: {nonce}"])
 
 
 async def ws_logon(ws):
-    """Read the challenge, sign the hello with SIGNER on CUSTODY's behalf, send the logon frame."""
     challenge = json.loads(await ws.recv())
     assert challenge.get("type") == "challenge", f"expected challenge, got {challenge.get('type')}"
     sig = Account.sign_message(encode_defunct(text=hello(challenge["nonce"])), SIGNER.key).signature.to_0x_hex()
@@ -57,10 +54,9 @@ async def ws_logon(ws):
 
 
 def taker_digest(rfq, q):
-    """Rebuild the digest the maker signed, so the gateway's terms_hash is checked."""
     blob = (b"\x01" + bytes.fromhex(rfq["pair_id"][2:])
             + ((1 if rfq["side"] == "buy" else -1) & 0xFF).to_bytes(1, "big")
-            + (rfq["settlement"] // 1000).to_bytes(5, "big")   # the u40 header packs seconds
+            + (rfq["settlement"] // 1000).to_bytes(5, "big")
             + int(Decimal(q["rate"]).scaleb(6)).to_bytes(8, "big"))
     struct_hash = keccak(encode(
         ["bytes32", "address", "address", "uint256", "uint16", "uint16",
@@ -71,16 +67,10 @@ def taker_digest(rfq, q):
     return keccak(b"\x19\x01" + SEP + struct_hash)
 
 
-HDR = {"content-type": "application/json"}          # content type only; sign_rest adds the credential
+HDR = {"content-type": "application/json"}
 
 
 def sign_rest(method, path, custody, signer_acct, nonce=None):
-    """The five signed headers every authed REST call carries, byte-identical to the gateway.
-
-    signer_acct signs the canonical CRX-REST-LOGIN message (EIP-191 personal_sign, newline
-    joined, no trailing newline): method uppercased, path with no query, custody and signer
-    lowercase 0x, timestamp unix ms.
-    """
     ts = int(time.time() * 1000)
     nonce = nonce or uuid.uuid4().hex
     custody = custody.lower()
@@ -93,7 +83,6 @@ def sign_rest(method, path, custody, signer_acct, nonce=None):
             "x-crx-nonce": nonce, "x-crx-sig": sig}
 
 
-# nothing here completes without a maker quoting the same pair on the other side
 async def main():
     async with websockets.connect(_ws(BASE) + "/ws",
                                   ping_interval=20, ping_timeout=20) as ws:
@@ -107,7 +96,6 @@ async def main():
         async for raw in ws:
             frame = json.loads(raw)
             data = frame.get("data") or {}
-            # every fact the Terms digest needs arrives on rfq.opened
             if frame["type"] == "rfq.opened" and data["rfq"]["rfq_id"] == rfq_id:
                 rfq = data["rfq"]
             if rfq and frame["type"] == "rfq.quoted" and data["quote"]["rfq_id"] == rfq_id:
