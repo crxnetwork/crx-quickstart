@@ -7,7 +7,7 @@ Python 3.9 or newer.
 ```bash
 pip3 install -r requirements.txt
 
-cp .env.example .env        # fill in CRX_SIGNER_PK and CRX_CUSTODY
+cp .env.example .env        # uncomment and fill in CRX_SIGNER_PK and CRX_CUSTODY
 set -a; . ./.env; set +a    # a missing name fails at import as KeyError: 'CRX_SIGNER_PK'
 
 python3 quote.py
@@ -72,7 +72,7 @@ on_rfq(price, PAIR)
 - `crx_maker.py` divides the wire `expiry` and `quote_expiry` by 1000 before packing them.
 - The gateway refuses the wrong scale: `400 bad_request: expiry … looks like unix seconds; wire timestamps are unix milliseconds`.
 
-**Testnet.** The signature is the credential — a whitelisted `(custody, signer)` pair, no minted key. Full API reference at https://docs.crxfx.com/dev-docs/api/.
+**Testnet.** The signature is the credential — a whitelisted `(custody, signer)` pair, no minted key. Full API reference at https://docs.crxfx.com/dev-docs/api/ (sign-in required).
 
 ## Two sides, two processes
 

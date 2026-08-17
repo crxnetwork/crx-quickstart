@@ -107,7 +107,7 @@ async def run():
                     assert body["leg_hash"] == "0x" + digest.hex(), "gateway rebuilt a different Leg"
                     stage = "trade open"
                 if frame["type"] == "trade.opened":
-                    arm = (data.get("arms") or [{}])[0]
+                    arm = next((a for a in data.get("arms") or [] if a.get("leg_id") == leg_id), {})
                     print("PASS", data["trade_id"], arm.get("result"), arm.get("tx"))
                     return
 
