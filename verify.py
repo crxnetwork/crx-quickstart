@@ -1,4 +1,5 @@
-import asyncio, json, os, sys, time, uuid
+import asyncio, json, os, sys, uuid
+from datetime import datetime, timedelta, timezone
 
 import requests, websockets
 from eth_account import Account
@@ -8,7 +9,10 @@ from crx_maker import (BASE, FLAT_IM_BPS, NDF, _body, _nonce, _separator, _ws,
                        leg_digest, login_frame, quote, sign_rest)
 
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
-EXPIRY_MS = (int(time.time()) + 7 * 86400) * 1000
+EXPIRY = datetime.now(timezone.utc) + timedelta(days=7)
+while EXPIRY.weekday() >= 5:
+    EXPIRY += timedelta(days=1)
+EXPIRY_MS = int(EXPIRY.timestamp() * 1000)
 WS = _ws(BASE) + "/ws"
 stage = "health"
 
@@ -104,4 +108,7 @@ try:
     asyncio.run(asyncio.wait_for(run(), 90))
 except asyncio.TimeoutError:
     print("FAIL: timed out at stage", stage)
+    sys.exit(1)
+except Exception as err:
+    print(f"FAIL at {stage}: {type(err).__name__}: {err}")
     sys.exit(1)

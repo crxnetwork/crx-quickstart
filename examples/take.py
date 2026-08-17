@@ -1,4 +1,4 @@
-import asyncio, json, os, time, uuid
+import asyncio, json, os, sys, time, uuid
 from decimal import Decimal
 
 import requests, websockets
@@ -55,6 +55,14 @@ async def ws_logon(ws):
     assert challenge.get("type") == "challenge", f"expected challenge, got {challenge.get('type')}"
     sig = Account.sign_message(encode_defunct(text=hello(challenge["nonce"])), SIGNER.key).signature.to_0x_hex()
     await ws.send(json.dumps({"type": "logon", "signer": SIGNER.address.lower(), "custody": CUSTODY, "sig": sig}))
+    async for raw in ws:
+        frame = json.loads(raw)
+        if frame["type"] == "logon_ack":
+            return frame["data"]
+        if frame["type"] == "error":
+            data = frame.get("data") or {}
+            print("logon refused:", data.get("code"), data.get("message"))
+            sys.exit(1)
 
 
 def taker_leg(q, leg_id, quote_expiry, rfq_id):

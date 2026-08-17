@@ -72,7 +72,7 @@ on_rfq(price, PAIR)
 - `crx_maker.py` divides the wire `expiry` and `quote_expiry` by 1000 before packing them.
 - The gateway refuses the wrong scale: `400 bad_request: expiry … looks like unix seconds; wire timestamps are unix milliseconds`.
 
-**Testnet.** The signature is the credential — a whitelisted `(custody, signer)` pair, no minted key. Full API reference at https://portal.crxfx.com/docs.
+**Testnet.** The signature is the credential — a whitelisted `(custody, signer)` pair, no minted key. Full API reference at https://docs.crxfx.com/dev-docs/api/.
 
 ## Two sides, two processes
 
