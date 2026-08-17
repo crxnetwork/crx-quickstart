@@ -1,17 +1,14 @@
 import asyncio, json, os, sys, time, uuid
-from decimal import Decimal
 
 import requests, websockets
-from eth_abi import encode
 from eth_account import Account
-from eth_utils import keccak
 
 import crx_maker
-from crx_maker import (BASE, NDF, TERMS_ABI_TYPES, TERMS_TYPEHASH, _body, _separator, _ws,
-                       login_frame, quote, sign_rest)
+from crx_maker import (BASE, FLAT_IM_BPS, NDF, _body, _nonce, _separator, _ws,
+                       leg_digest, login_frame, quote, sign_rest)
 
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
-SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
+EXPIRY_MS = (int(time.time()) + 7 * 86400) * 1000
 WS = _ws(BASE) + "/ws"
 stage = "health"
 
@@ -31,16 +28,12 @@ async def logon(ws, signer_acct, custody):
             sys.exit(1)
 
 
-def taker_digest(rfq, q):
-    side = 1 if rfq["side"] == "buy" else -1
-    struct_hash = keccak(encode(
-        TERMS_ABI_TYPES,
-        [TERMS_TYPEHASH, rfq["taker"], q["maker"], int(Decimal(rfq["notional"]).scaleb(6)),
-         q["im_bps_taker"], q["im_bps_maker"], rfq["premium_bps"],
-         q["expires_at"] // 1000, int(q["nonce"]), NDF,
-         bytes.fromhex(rfq["pair_id"][2:]), side, rfq["settlement"] // 1000,
-         int(Decimal(q["rate"]).scaleb(6))]))
-    return keccak(b"\x19\x01" + _separator(rfq["chain"]) + struct_hash)
+def taker_leg_of(q, custody, leg_id, quote_expiry, rfq_id):
+    return {"seat": custody, "leg_id": leg_id, "join_ref": q["join_ref"],
+            "pair_id": q["pair_id"], "instrument_id": NDF, "side": q["side"],
+            "notional": q["notional"], "rate": q["rate"], "im_bps": FLAT_IM_BPS,
+            "premium_bps": q["premium_bps"], "expiry": q["expiry"],
+            "nonce": str(_nonce(custody, rfq_id)), "quote_expiry": quote_expiry}
 
 
 async def maker_leg(ws, rfq_id):
@@ -49,7 +42,7 @@ async def maker_leg(ws, rfq_id):
         frame = json.loads(raw)
         if frame["type"] == "rfq.opened" and frame["data"]["rfq_id"] == rfq_id:
             stage = "maker quote"
-            q = quote(frame["data"], rate="146.250000", im_bps=292, firm_for=60)
+            q = quote(frame["data"], rate="146.250000", firm_for=60)
             print("quoted", q["quote_id"])
             return
 
@@ -72,29 +65,27 @@ async def run():
         taker = Account.from_key(taker_pk)
         taker_custody = os.environ["CRX_TAKER_CUSTODY"].lower()
 
-        async def taker_leg(ws, rfq_id):
+        async def taker_leg(ws, rfq_id, leg_id, quote_expiry):
             global stage
-            rfq = None
             async for raw in ws:
                 frame = json.loads(raw)
                 data = frame.get("data") or {}
-                if frame["type"] == "rfq.opened" and data["rfq_id"] == rfq_id:
-                    rfq = data
-                if rfq and frame["type"] == "rfq.quoted" and data["rfq_id"] == rfq_id:
-                    q = data
-                    if q["maker"].lower() != crx_maker.CUSTODY:
-                        continue
+                if data.get("rfq_id") != rfq_id:
+                    continue
+                if frame["type"] == "rfq.quoted":
                     stage = "taker accept"
-                    digest = taker_digest(rfq, q)
-                    assert q["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
+                    leg = taker_leg_of(data, taker_custody, leg_id, quote_expiry, rfq_id)
+                    digest = leg_digest(CHAIN, leg)
                     sig = Account.unsafe_sign_hash(digest, taker.key).signature.to_0x_hex()
                     apath = f"/rfqs/{rfq_id}/accept"
                     aheaders = {**crx_maker.HDR, **sign_rest("POST", apath, taker_custody, taker)}
-                    _body(requests.post(f"{BASE}{apath}", headers=aheaders, timeout=10,
-                                        json={"quote_id": q["quote_id"], "sig_taker": sig}))
+                    body = _body(requests.post(f"{BASE}{apath}", headers=aheaders, timeout=10,
+                                               json={"quote_id": data["quote_id"], "leg": leg, "sig": sig}))
+                    assert body["leg_hash"] == "0x" + digest.hex(), "gateway rebuilt a different Leg"
                     stage = "trade open"
-                if frame["type"] == "trade.opened" and data.get("rfq_id") == rfq_id:
-                    print("PASS", data["trade_id"], data["tx"])
+                if frame["type"] == "trade.opened":
+                    arm = (data.get("arms") or [{}])[0]
+                    print("PASS", data["trade_id"], arm.get("result"), arm.get("tx"))
                     return
 
         async with websockets.connect(WS, ping_interval=20, ping_timeout=20) as taker_ws:
@@ -102,11 +93,11 @@ async def run():
             stage = "rfq open"
             oheaders = {**crx_maker.HDR, **sign_rest("POST", "/rfqs", taker_custody, taker)}
             ack = _body(requests.post(f"{BASE}/rfqs", headers=oheaders, timeout=10, json={
-                "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,
+                "chain": CHAIN, "pair": PAIR, "side": SIDE, "expiry": EXPIRY_MS,
                 "notional": NOTIONAL, "client_rfq_id": f"verify-{uuid.uuid4().hex[:12]}"}))
             print("rfq", ack["rfq_id"])
             await asyncio.gather(maker_leg(maker_ws, ack["rfq_id"]),
-                                 taker_leg(taker_ws, ack["rfq_id"]))
+                                 taker_leg(taker_ws, ack["rfq_id"], ack["leg_id"], ack["quote_expiry"]))
 
 
 try:

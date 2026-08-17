@@ -1,4 +1,4 @@
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 import asyncio, json, os, time, uuid
 from decimal import Decimal
@@ -80,29 +80,19 @@ async def ws_logon(ws, nonce):
     return frame
 
 
-TERMS_TYPE = ("Terms(address taker,address maker,uint256 notional,"
-              "uint16 imBpsTaker,uint16 imBpsMaker,int16 premiumBps,"
-              "uint40 expiry,uint64 nonce,uint8 instrumentId,bytes32 pair,"
-              "int8 side,uint40 settlement,uint64 rate)")
-TERMS_TYPEHASH = keccak(text=TERMS_TYPE)
+LEG_TYPE = ("Leg(address seat,bytes32 legId,bytes32 joinRef,bytes32 pair,"
+            "uint8 instrumentId,int8 side,uint256 notional,uint64 rate,"
+            "uint16 imBps,int16 premiumBps,uint40 expiry,uint64 nonce,"
+            "uint64 quoteExpiry)")
+LEG_TYPEHASH = keccak(text=LEG_TYPE)
 DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,"
                               "uint256 chainId,address verifyingContract)")
 
-# ABI head types for the flat Terms struct hash, aligned to TERMS_TYPE.
-TERMS_ABI_TYPES = ["bytes32", "address", "address", "uint256", "uint16", "uint16", "int16",
-                   "uint40", "uint64", "uint8", "bytes32", "int8", "uint40", "uint64"]
+# ABI head types for the Leg struct hash, aligned to LEG_TYPE.
+LEG_ABI_TYPES = ["bytes32", "address", "bytes32", "bytes32", "bytes32", "uint8", "int8",
+                 "uint256", "uint64", "uint16", "int16", "uint40", "uint64", "uint64"]
 NDF = 1  # instrumentId for the non-deliverable forward
-
-CANCEL_ABI = [{"type": "function", "name": "cancelQuote", "stateMutability": "nonpayable", "outputs": [],
-               "inputs": [{"name": "t", "type": "tuple", "components": [
-                   {"name": "taker", "type": "address"}, {"name": "maker", "type": "address"},
-                   {"name": "notional", "type": "uint256"},
-                   {"name": "imBpsTaker", "type": "uint16"}, {"name": "imBpsMaker", "type": "uint16"},
-                   {"name": "premiumBps", "type": "int16"},
-                   {"name": "expiry", "type": "uint40"}, {"name": "nonce", "type": "uint64"},
-                   {"name": "instrumentId", "type": "uint8"}, {"name": "pair", "type": "bytes32"},
-                   {"name": "side", "type": "int8"}, {"name": "settlement", "type": "uint40"},
-                   {"name": "rate", "type": "uint64"}]}]}]
+FLAT_IM_BPS = 100  # the flat protocol IM, both seats
 
 
 def _separator(chain_key):
@@ -114,34 +104,43 @@ def _separator(chain_key):
     return sep
 
 
-def _digest(rfq, rate, im_bps, expiry, cqid):
-    side = 1 if rfq["side"] == "buy" else -1
-    nonce = int.from_bytes(
-        keccak(bytes.fromhex(CUSTODY[2:]) + cqid.encode())[-8:], "big")
+def _nonce(seat, client_quote_id):
+    return int.from_bytes(
+        keccak(bytes.fromhex(seat[2:]) + client_quote_id.encode())[-8:], "big")
+
+
+def _leg(rfq, rate, nonce):
+    return {"seat": CUSTODY, "leg_id": rfq["leg_id"], "join_ref": rfq["join_ref"],
+            "pair_id": rfq["pair_id"], "instrument_id": NDF, "side": rfq["side"],
+            "notional": rfq["notional"], "rate": rate, "im_bps": FLAT_IM_BPS,
+            "premium_bps": rfq["premium_bps"], "expiry": rfq["expiry"],
+            "nonce": str(nonce), "quote_expiry": rfq["quote_expiry"]}
+
+
+def leg_digest(chain, leg):
     struct_hash = keccak(encode(
-        TERMS_ABI_TYPES,
-        [TERMS_TYPEHASH, rfq["taker"], CUSTODY,
-         int(Decimal(rfq["notional"]).scaleb(6)),
-         im_bps, im_bps, rfq["premium_bps"], expiry, nonce, NDF,
-         bytes.fromhex(rfq["pair_id"][2:]), side, rfq["settlement"] // 1000,
-         int(Decimal(rate).scaleb(6))]))
-    return keccak(b"\x19\x01" + _separator(rfq["chain"]) + struct_hash)
+        LEG_ABI_TYPES,
+        [LEG_TYPEHASH, leg["seat"], bytes.fromhex(leg["leg_id"][2:]),
+         bytes.fromhex(leg["join_ref"][2:]), bytes.fromhex(leg["pair_id"][2:]),
+         leg["instrument_id"], leg["side"], int(Decimal(leg["notional"]).scaleb(6)),
+         int(Decimal(leg["rate"]).scaleb(6)), leg["im_bps"], leg["premium_bps"],
+         leg["expiry"] // 1000, int(leg["nonce"]), leg["quote_expiry"] // 1000]))
+    return keccak(b"\x19\x01" + _separator(chain) + struct_hash)
 
 
-def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
+def quote(rfq, *, rate, firm_for=60, client_quote_id=None):
     cqid = client_quote_id or f"{rfq['pair']}.{rfq['rfq_id'][2:14]}"
-    expiry = int(time.time()) + firm_for
-    digest = _digest(rfq, rate, im_bps, expiry, cqid)
+    leg = _leg(rfq, rate, _nonce(CUSTODY, cqid))
+    digest = leg_digest(rfq["chain"], leg)
     sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
     assert Account._recover_hash(digest, signature=sig) == SIGNER.address
     path = f"/rfqs/{rfq['rfq_id']}/quotes"
     headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
     body = _body(requests.post(f"{BASE}{path}", headers=headers, timeout=10,
                                json={"maker": CUSTODY, "rate": rate,
-                                     "im_bps_taker": im_bps, "im_bps_maker": im_bps,
-                                     "expires_at": expiry * 1000, "sig": sig,
-                                     "client_quote_id": cqid}))
-    assert body["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
+                                     "expires_at": (int(time.time()) + firm_for) * 1000,
+                                     "sig": sig, "client_quote_id": cqid}))
+    assert body["leg_hash"] == "0x" + digest.hex(), "gateway rebuilt a different Leg"
     return body
 
 
@@ -190,16 +189,6 @@ def on_rfq(handler, *pairs):
 
 def _w3():
     return Web3(Web3.HTTPProvider(os.environ["CRX_RPC_URL"]))
-
-
-def cancel_quote(terms):
-    w3 = _w3()
-    core = w3.eth.contract(address=os.environ["CRX_CORE"], abi=CANCEL_ABI)
-    values = tuple(terms.values()) if isinstance(terms, dict) else tuple(terms)
-    tx = core.functions.cancelQuote(values).build_transaction(
-        {"from": SIGNER.address, "nonce": w3.eth.get_transaction_count(SIGNER.address)})
-    sent = w3.eth.send_raw_transaction(SIGNER.sign_transaction(tx).raw_transaction)
-    return sent.hex()
 
 
 def _submit_gateway_tx(w3, tx):

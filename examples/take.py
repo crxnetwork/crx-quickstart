@@ -11,13 +11,15 @@ BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
 SIGNER = Account.from_key(os.environ["CRX_TAKER_SIGNER_PK"])
 CUSTODY = os.environ["CRX_TAKER_CUSTODY"].lower()
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"
-SETTLEMENT_MS = (int(time.time()) + 7 * 86400) * 1000
+EXPIRY_MS = (int(time.time()) + 7 * 86400) * 1000
 
-TERMS_TYPEHASH = keccak(text="Terms(address taker,address maker,uint256 notional,uint16 imBpsTaker,"
-                             "uint16 imBpsMaker,int16 premiumBps,uint40 expiry,uint64 nonce,"
-                             "uint8 instrumentId,bytes32 pair,int8 side,uint40 settlement,uint64 rate)")
+LEG_TYPEHASH = keccak(text="Leg(address seat,bytes32 legId,bytes32 joinRef,bytes32 pair,"
+                           "uint8 instrumentId,int8 side,uint256 notional,uint64 rate,"
+                           "uint16 imBps,int16 premiumBps,uint40 expiry,uint64 nonce,"
+                           "uint64 quoteExpiry)")
 DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
 NDF = 1  # instrumentId for the non-deliverable forward
+FLAT_IM_BPS = 100
 
 
 def _ws(base):
@@ -55,16 +57,24 @@ async def ws_logon(ws):
     await ws.send(json.dumps({"type": "logon", "signer": SIGNER.address.lower(), "custody": CUSTODY, "sig": sig}))
 
 
-def taker_digest(rfq, q):
-    side = 1 if rfq["side"] == "buy" else -1
+def taker_leg(q, leg_id, quote_expiry, rfq_id):
+    nonce = int.from_bytes(keccak(bytes.fromhex(CUSTODY[2:]) + rfq_id.encode())[-8:], "big")
+    return {"seat": CUSTODY, "leg_id": leg_id, "join_ref": q["join_ref"],
+            "pair_id": q["pair_id"], "instrument_id": NDF, "side": q["side"],
+            "notional": q["notional"], "rate": q["rate"], "im_bps": FLAT_IM_BPS,
+            "premium_bps": q["premium_bps"], "expiry": q["expiry"],
+            "nonce": str(nonce), "quote_expiry": quote_expiry}
+
+
+def leg_digest(leg):
     struct_hash = keccak(encode(
-        ["bytes32", "address", "address", "uint256", "uint16", "uint16", "int16",
-         "uint40", "uint64", "uint8", "bytes32", "int8", "uint40", "uint64"],
-        [TERMS_TYPEHASH, rfq["taker"], q["maker"], int(Decimal(rfq["notional"]).scaleb(6)),
-         q["im_bps_taker"], q["im_bps_maker"], rfq["premium_bps"],
-         q["expires_at"] // 1000, int(q["nonce"]), NDF,
-         bytes.fromhex(rfq["pair_id"][2:]), side, rfq["settlement"] // 1000,
-         int(Decimal(q["rate"]).scaleb(6))]))
+        ["bytes32", "address", "bytes32", "bytes32", "bytes32", "uint8", "int8",
+         "uint256", "uint64", "uint16", "int16", "uint40", "uint64", "uint64"],
+        [LEG_TYPEHASH, leg["seat"], bytes.fromhex(leg["leg_id"][2:]),
+         bytes.fromhex(leg["join_ref"][2:]), bytes.fromhex(leg["pair_id"][2:]),
+         leg["instrument_id"], leg["side"], int(Decimal(leg["notional"]).scaleb(6)),
+         int(Decimal(leg["rate"]).scaleb(6)), leg["im_bps"], leg["premium_bps"],
+         leg["expiry"] // 1000, int(leg["nonce"]), leg["quote_expiry"] // 1000]))
     return keccak(b"\x19\x01" + SEP + struct_hash)
 
 
@@ -90,27 +100,30 @@ async def main():
         await ws_logon(ws)
         oheaders = {**HDR, **sign_rest("POST", "/rfqs", CUSTODY, SIGNER)}
         ack = _body(requests.post(f"{BASE}/rfqs", headers=oheaders, timeout=10, json={
-            "chain": CHAIN, "pair": PAIR, "side": SIDE, "settlement": SETTLEMENT_MS,
+            "chain": CHAIN, "pair": PAIR, "side": SIDE, "expiry": EXPIRY_MS,
             "notional": NOTIONAL, "client_rfq_id": f"take-{uuid.uuid4().hex[:12]}"}))
-        rfq_id, rfq = ack["rfq_id"], None
+        rfq_id, my_leg_id, quote_expiry = ack["rfq_id"], ack["leg_id"], ack["quote_expiry"]
         print("rfq", rfq_id)
+        accepted = False
         async for raw in ws:
             frame = json.loads(raw)
             data = frame.get("data") or {}
-            if frame["type"] == "rfq.opened" and data["rfq_id"] == rfq_id:
-                rfq = data
-            if rfq and frame["type"] == "rfq.quoted" and data["rfq_id"] == rfq_id:
-                q = data
-                digest = taker_digest(rfq, q)
-                assert q["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
+            if data.get("rfq_id") != rfq_id:
+                continue
+            if frame["type"] == "rfq.quoted" and not accepted:
+                leg = taker_leg(data, my_leg_id, quote_expiry, rfq_id)
+                digest = leg_digest(leg)
                 sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
                 apath = f"/rfqs/{rfq_id}/accept"
                 aheaders = {**HDR, **sign_rest("POST", apath, CUSTODY, SIGNER)}
-                _body(requests.post(f"{BASE}{apath}", headers=aheaders,
-                                    timeout=10, json={"quote_id": q["quote_id"], "sig_taker": sig}))
-                print("accepted", q["quote_id"])
-            if frame["type"] == "trade.opened" and data["rfq_id"] == rfq_id:
-                print("opened", data["trade_id"], data["tx"])
+                body = _body(requests.post(f"{BASE}{apath}", headers=aheaders, timeout=10,
+                                           json={"quote_id": data["quote_id"], "leg": leg, "sig": sig}))
+                assert body["leg_hash"] == "0x" + digest.hex(), "gateway rebuilt a different Leg"
+                accepted = True
+                print("accepted", data["quote_id"])
+            if frame["type"] == "trade.opened":
+                arm = (data.get("arms") or [{}])[0]
+                print("opened", data["trade_id"], arm.get("result"), arm.get("tx"))
                 return
 
 asyncio.run(main())
