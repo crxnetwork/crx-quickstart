@@ -38,7 +38,7 @@ async def main():
             if frame["type"] == "rfq.opened":
                 r = frame["data"]
                 print("rfq_id:", r["rfq_id"])
-                print(r["pair"], r["side"], "notional", r["notional"], "settlement", r["settlement"])
+                print(r["pair"], r["side"], "notional", r["notional"], "expiry", r["expiry"])
                 return
 
 asyncio.run(main())

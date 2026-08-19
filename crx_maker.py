@@ -1,4 +1,4 @@
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 import asyncio, json, os, time, uuid
 from decimal import Decimal
@@ -80,29 +80,19 @@ async def ws_logon(ws, nonce):
     return frame
 
 
-TERMS_TYPE = ("Terms(address taker,address maker,uint256 notional,"
-              "uint16 imBpsTaker,uint16 imBpsMaker,int16 premiumBps,"
-              "uint40 expiry,uint64 nonce,uint8 instrumentId,bytes32 pair,"
-              "int8 side,uint40 settlement,uint64 rate)")
-TERMS_TYPEHASH = keccak(text=TERMS_TYPE)
+LEG_TYPE = ("Leg(address seat,bytes32 legId,bytes32 joinRef,bytes32 pair,"
+            "uint8 instrumentId,int8 side,uint256 notional,uint64 rate,"
+            "uint16 imBps,int16 premiumBps,uint40 expiry,uint64 nonce,"
+            "uint64 quoteExpiry)")
+LEG_TYPEHASH = keccak(text=LEG_TYPE)
 DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,"
                               "uint256 chainId,address verifyingContract)")
 
-# ABI head types for the flat Terms struct hash, aligned to TERMS_TYPE.
-TERMS_ABI_TYPES = ["bytes32", "address", "address", "uint256", "uint16", "uint16", "int16",
-                   "uint40", "uint64", "uint8", "bytes32", "int8", "uint40", "uint64"]
+# ABI head types for the Leg struct hash, aligned to LEG_TYPE.
+LEG_ABI_TYPES = ["bytes32", "address", "bytes32", "bytes32", "bytes32", "uint8", "int8",
+                 "uint256", "uint64", "uint16", "int16", "uint40", "uint64", "uint64"]
 NDF = 1  # instrumentId for the non-deliverable forward
-
-CANCEL_ABI = [{"type": "function", "name": "cancelQuote", "stateMutability": "nonpayable", "outputs": [],
-               "inputs": [{"name": "t", "type": "tuple", "components": [
-                   {"name": "taker", "type": "address"}, {"name": "maker", "type": "address"},
-                   {"name": "notional", "type": "uint256"},
-                   {"name": "imBpsTaker", "type": "uint16"}, {"name": "imBpsMaker", "type": "uint16"},
-                   {"name": "premiumBps", "type": "int16"},
-                   {"name": "expiry", "type": "uint40"}, {"name": "nonce", "type": "uint64"},
-                   {"name": "instrumentId", "type": "uint8"}, {"name": "pair", "type": "bytes32"},
-                   {"name": "side", "type": "int8"}, {"name": "settlement", "type": "uint40"},
-                   {"name": "rate", "type": "uint64"}]}]}]
+FLAT_IM_BPS = 100  # the flat protocol IM, both seats
 
 
 def _separator(chain_key):
@@ -114,34 +104,43 @@ def _separator(chain_key):
     return sep
 
 
-def _digest(rfq, rate, im_bps, expiry, cqid):
-    side = 1 if rfq["side"] == "buy" else -1
-    nonce = int.from_bytes(
-        keccak(bytes.fromhex(CUSTODY[2:]) + cqid.encode())[-8:], "big")
+def _nonce(seat, client_quote_id):
+    return int.from_bytes(
+        keccak(bytes.fromhex(seat[2:]) + client_quote_id.encode())[-8:], "big")
+
+
+def _leg(rfq, rate, nonce):
+    return {"seat": CUSTODY, "leg_id": rfq["leg_id"], "join_ref": rfq["join_ref"],
+            "pair_id": rfq["pair_id"], "instrument_id": NDF, "side": rfq["side"],
+            "notional": rfq["notional"], "rate": rate, "im_bps": FLAT_IM_BPS,
+            "premium_bps": rfq["premium_bps"], "expiry": rfq["expiry"],
+            "nonce": str(nonce), "quote_expiry": rfq["quote_expiry"]}
+
+
+def leg_digest(chain, leg):
     struct_hash = keccak(encode(
-        TERMS_ABI_TYPES,
-        [TERMS_TYPEHASH, rfq["taker"], CUSTODY,
-         int(Decimal(rfq["notional"]).scaleb(6)),
-         im_bps, im_bps, rfq["premium_bps"], expiry, nonce, NDF,
-         bytes.fromhex(rfq["pair_id"][2:]), side, rfq["settlement"] // 1000,
-         int(Decimal(rate).scaleb(6))]))
-    return keccak(b"\x19\x01" + _separator(rfq["chain"]) + struct_hash)
+        LEG_ABI_TYPES,
+        [LEG_TYPEHASH, leg["seat"], bytes.fromhex(leg["leg_id"][2:]),
+         bytes.fromhex(leg["join_ref"][2:]), bytes.fromhex(leg["pair_id"][2:]),
+         leg["instrument_id"], leg["side"], int(Decimal(leg["notional"]).scaleb(6)),
+         int(Decimal(leg["rate"]).scaleb(6)), leg["im_bps"], leg["premium_bps"],
+         leg["expiry"] // 1000, int(leg["nonce"]), leg["quote_expiry"] // 1000]))
+    return keccak(b"\x19\x01" + _separator(chain) + struct_hash)
 
 
-def quote(rfq, *, rate, im_bps, firm_for=60, client_quote_id=None):
+def quote(rfq, *, rate, firm_for=60, client_quote_id=None):
     cqid = client_quote_id or f"{rfq['pair']}.{rfq['rfq_id'][2:14]}"
-    expiry = int(time.time()) + firm_for
-    digest = _digest(rfq, rate, im_bps, expiry, cqid)
+    leg = _leg(rfq, rate, _nonce(CUSTODY, cqid))
+    digest = leg_digest(rfq["chain"], leg)
     sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
     assert Account._recover_hash(digest, signature=sig) == SIGNER.address
     path = f"/rfqs/{rfq['rfq_id']}/quotes"
     headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
     body = _body(requests.post(f"{BASE}{path}", headers=headers, timeout=10,
                                json={"maker": CUSTODY, "rate": rate,
-                                     "im_bps_taker": im_bps, "im_bps_maker": im_bps,
-                                     "expires_at": expiry * 1000, "sig": sig,
-                                     "client_quote_id": cqid}))
-    assert body["terms_hash"] == "0x" + digest.hex(), "gateway rebuilt different Terms"
+                                     "expires_at": (int(time.time()) + firm_for) * 1000,
+                                     "sig": sig, "client_quote_id": cqid}))
+    assert body["leg_hash"] == "0x" + digest.hex(), "gateway rebuilt a different Leg"
     return body
 
 
@@ -192,16 +191,6 @@ def _w3():
     return Web3(Web3.HTTPProvider(os.environ["CRX_RPC_URL"]))
 
 
-def cancel_quote(terms):
-    w3 = _w3()
-    core = w3.eth.contract(address=os.environ["CRX_CORE"], abi=CANCEL_ABI)
-    values = tuple(terms.values()) if isinstance(terms, dict) else tuple(terms)
-    tx = core.functions.cancelQuote(values).build_transaction(
-        {"from": SIGNER.address, "nonce": w3.eth.get_transaction_count(SIGNER.address)})
-    sent = w3.eth.send_raw_transaction(SIGNER.sign_transaction(tx).raw_transaction)
-    return sent.hex()
-
-
 def _submit_gateway_tx(w3, tx):
     txn = {"from": SIGNER.address, "to": tx["to"], "data": tx["data"], "value": int(tx["value"]),
            "chainId": tx["chain_id"], "nonce": w3.eth.get_transaction_count(SIGNER.address),
@@ -218,6 +207,77 @@ def _gateway_flow(endpoint, payload):
     body = _body(requests.post(f"{ROOT}{path}", headers=headers, timeout=10, json=payload))
     w3 = _w3()
     return [_submit_gateway_tx(w3, tx) for tx in body["transactions"]]
+
+
+# ── arm-encrypt P5: the SEALED half-arm (OPEN_SIDE) ───────────────────────────
+# The maker seals its own half of a trade: a CSPRNG salt hides every leg field
+# behind a commitment C, the terms are HPKE-encrypted to {self=maker, house}, and
+# the seat signs the sealed EIP-712 Leg digest. See arm_seal.py. The maker NEVER
+# wraps to the taker, so it never needs the taker's encKey and never learns the
+# counterparty. This is a NEW path — the plaintext quote()/deposit()/withdraw()
+# flows above are untouched.
+
+SUBMIT_BASE = os.environ.get("CRX_SUBMIT_BASE", BASE).rstrip("/")
+
+
+def _enc_keys():
+    """The maker's OWN recipients, in wrap order [self=maker, house]. Sourced from
+    CRX_ENC_KEYS ("0xself,0xhouse") — each a bytes32. The maker wraps only to
+    itself and CRX; it NEVER needs the taker's encKey, so the counterparty stays
+    private. `self` is the maker's own seat key; `house` is a CRX constant that
+    rides on /health. Pass enc_keys= per-arm to override the env."""
+    raw = os.environ.get("CRX_ENC_KEYS", "")
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if len(keys) != 2:
+        raise CrxError(0, {"code": "enc_keys_unset",
+                           "error": "set CRX_ENC_KEYS=0xself,0xhouse (bytes32 each) "
+                                    "or pass enc_keys= to arm_open_side_sealed"})
+    return keys
+
+
+def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=False,
+                         nonce=None, client_quote_id=None):
+    """Seal and broadcast the maker's OPEN_SIDE half-arm for one RFQ.
+
+    Builds C over the FULL leg, HPKE-seals the terms to [self=maker, house],
+    signs the sealed Leg digest, and POSTs the envelope to the submitter's
+    `/submit/open-side-sealed`. Returns the submitter's receipt JSON."""
+    import arm_seal
+    cqid = client_quote_id or f"{rfq['pair']}.{rfq['rfq_id'][2:14]}"
+    n = nonce if nonce is not None else _nonce(CUSTODY, cqid)
+    chain_key = rfq["chain"]
+    chain_id = CHAINS[chain_key]["chain_id"]
+    domain = _separator(chain_key)  # asserts against /health before signing
+
+    # The FULL leg the commitment hides. Canonical units: seconds, 6-dp integers.
+    leg = {
+        "seat": CUSTODY,
+        "legId": rfq["leg_id"],
+        "joinRef": rfq["join_ref"],
+        "pair": rfq["pair_id"],
+        "instrumentId": NDF,
+        "side": rfq["side"],
+        "notional": int(Decimal(str(rfq["notional"])).scaleb(6)),
+        "rate": int(Decimal(str(rate)).scaleb(6)),
+        "imBps": FLAT_IM_BPS,
+        "premiumBps": rfq["premium_bps"],
+        "expiry": rfq["expiry"] // 1000,
+        "nonce": n,
+        "quoteExpiry": rfq["quote_expiry"] // 1000,
+    }
+
+    def _sign(digest):
+        sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
+        assert Account._recover_hash(digest, signature=sig) == SIGNER.address
+        return sig
+
+    body, _digest = arm_seal.build_open_side_sealed(
+        chain_id, domain, leg, _sign, enc_keys or _enc_keys(),
+        include_witness=include_witness)
+
+    path = "/submit/open-side-sealed"
+    headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
+    return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
 
 
 def deposit(chain, symbol, amount):
