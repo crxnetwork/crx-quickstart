@@ -123,31 +123,46 @@ def test_salt_discipline():
     assert A.random_salt() != A.random_salt()  # fresh each draw
 
 
-def test_hpke_round_trip_all_three_recipients():
-    """Encrypt one leg's plaintext, HPKE-seal to 3 recipients, and prove EACH
-    recipient opens its wrap -> content_key -> the exact plaintext. Then re-derive
-    C from the decrypted plaintext to prove the opening binds the commitment."""
+def test_hpke_round_trip_self_and_house_only():
+    """Encrypt one leg's plaintext, HPKE-seal to ONLY {self, house}, and prove each
+    of those two opens its wrap -> content_key -> the exact plaintext. Then re-derive
+    C from the decrypted plaintext to prove the opening binds the commitment. The
+    COUNTERPARTY is never a recipient: its key must fail to open any wrap, and the
+    maker builds the envelope from self+house keys alone."""
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-    sks = [X25519PrivateKey.generate() for _ in range(3)]
-    enc_keys = [sk.public_key().public_bytes_raw() for sk in sks]
-    sk_bytes = [sk.private_bytes_raw() for sk in sks]
+    # the arming seat (self) and CRX (house) — the ONLY two recipients
+    self_sk = X25519PrivateKey.generate()
+    house_sk = X25519PrivateKey.generate()
+    enc_keys = [self_sk.public_key().public_bytes_raw(),
+                house_sk.public_key().public_bytes_raw()]
+    sk_bytes = [self_sk.private_bytes_raw(), house_sk.private_bytes_raw()]
+
+    # the counterparty (taker) key is NOT passed to the maker's seal
+    taker_sk = X25519PrivateKey.generate()
 
     salt = A.random_salt()
     plaintext = A.encode_item_plaintext(A.LEG_FULL_FIELDS, A.LEG_FULL_TYPES, LEG, salt)
     wraps, content_key = A.seal_item(plaintext, enc_keys)
 
-    assert len(wraps) == 4, "wraps = [ciphertext, wrap_taker, wrap_maker, wrap_crx]"
-    for i in range(3):  # taker, maker, house each recover the plaintext
+    assert len(wraps) == 3, "wraps = [ciphertext, wrap_self, wrap_house]"
+    for i in range(2):  # self, house each recover the plaintext
         opened = A.open_item(sk_bytes[i], i + 1, wraps)
         assert opened == plaintext, f"recipient {i} failed to decrypt"
         # the decrypted plaintext re-derives the signed commitment
         assert A.commit_leg(LEG, salt) == A.commit(
             A.LEG_FULL_FIELDS, A.LEG_FULL_TYPES, LEG, salt)
 
-    # a stranger key cannot open any wrap
-    stranger = X25519PrivateKey.generate().private_bytes_raw()
     import pyhpke
+    # the counterparty (taker) is not a recipient — its key opens NO wrap
+    for idx in (1, 2):
+        try:
+            A.open_item(taker_sk.private_bytes_raw(), idx, wraps)
+            assert False, "taker opened a wrap — counterparty leak"
+        except pyhpke.exceptions.OpenError:
+            pass
+    # an unrelated stranger key likewise cannot open any wrap
+    stranger = X25519PrivateKey.generate().private_bytes_raw()
     try:
         A.open_item(stranger, 1, wraps)
         assert False, "stranger opened a wrap"
@@ -163,7 +178,8 @@ def test_build_open_side_sealed_body_and_digest():
     domain = b"\xD0" * 32  # any 32-byte domain; the submitter reconstructs the same digest
 
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-    enc_keys = [X25519PrivateKey.generate().public_key().public_bytes_raw() for _ in range(3)]
+    # the maker builds with ONLY its own key + the house key — no taker key exists here
+    enc_keys = [X25519PrivateKey.generate().public_key().public_bytes_raw() for _ in range(2)]
 
     def sign(d):
         return Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
@@ -173,7 +189,7 @@ def test_build_open_side_sealed_body_and_digest():
     # body shape (mirrors crx-submitter open.rs OpenSideSealedRequest)
     assert set(body) >= {"chainId", "public", "commitment", "wrapsHash", "wraps", "sig", "witness"}
     assert set(body["public"]) == {"seat", "legId", "nonce", "quoteExpiry"}
-    assert len(body["wraps"]) == 4
+    assert len(body["wraps"]) == 3  # [ciphertext, wrap_self, wrap_house]
     # the sig recovers the seat over the reconstructed digest (submitter step 2)
     assert Account._recover_hash(digest, signature=body["sig"]) == acct.address
     # wrapsHash binds the wraps (submitter step 1)

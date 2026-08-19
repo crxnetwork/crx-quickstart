@@ -4,9 +4,16 @@ The maker (seat) no longer sends plaintext trade terms on chain. Each confidenti
 item is SEALED:
 
     C         = keccak256(abi.encode(<full item struct>, salt32))   # commitment
-    wraps     = [ciphertext, wrap_taker, wrap_maker, wrap_crx]       # HPKE envelope
+    wraps     = [ciphertext, wrap_self, wrap_house]                  # HPKE envelope
     wrapsHash = keccak256(abi.encode(bytes[] wraps))
     sig       = seat sig over the sealed EIP-712 digest {publicFields, C, wrapsHash}
+
+COUNTERPARTY PRIVACY — each side wraps ONLY to {itself, house}. When the maker
+arms its half it seals to {maker(self), house}; the taker arms its own half to
+{taker(self), house}. Neither side ever needs the other's encKey, so arming a
+half leaks nothing about the counterparty. The arming seat recovers its half from
+its own wrap; CRX (house) gets every half for its audit record; the counterparty
+already holds the trade economics from signing its own half.
 
 This module is a BYTE-EXACT mirror of the contract + guest at
 /private/tmp/crx-arm-encrypt @ 7d0d6ee3 (Wire.sol / ArmLib.sol / ArmItems) and of
@@ -23,9 +30,8 @@ ChaCha20Poly1305. The bulk item is encrypted once under a fresh content_key
 `encKey` (a raw X25519 public key). Wrap layout:
 
     wraps[0] = nonce(12) || ChaCha20Poly1305(content_key, nonce, abi.encode(item)||salt)
-    wraps[1] = enc(32) || HPKE-Seal(taker.encKey, content_key)
-    wraps[2] = enc(32) || HPKE-Seal(maker.encKey, content_key)
-    wraps[3] = enc(32) || HPKE-Seal(house.encKey, content_key)
+    wraps[1] = enc(32) || HPKE-Seal(self.encKey, content_key)   # the arming seat
+    wraps[2] = enc(32) || HPKE-Seal(house.encKey, content_key)  # CRX audit record
 
 The chain binds only `wrapsHash`; the layout is a client/guest convention.
 """
@@ -316,7 +322,8 @@ def seal_item(plaintext, recipient_enc_keys):
     HPKE-seal that key to each recipient. Returns the `wraps` list:
         wraps[0]   = nonce(12) || ChaCha20Poly1305(content_key, nonce, plaintext)
         wraps[1:]  = enc || HPKE-Seal(encKey_i, content_key)  per recipient, in order
-    `recipient_enc_keys` is [taker.encKey, maker.encKey, house.encKey]."""
+    `recipient_enc_keys` is [self.encKey, house.encKey] — the arming seat and CRX.
+    The counterparty is NEVER a recipient, so a half-arm leaks nothing about it."""
     content_key = ChaCha20Poly1305.generate_key()  # 32 bytes
     nonce = secrets.token_bytes(12)
     ct = ChaCha20Poly1305(content_key).encrypt(nonce, plaintext, None)
@@ -327,7 +334,7 @@ def seal_item(plaintext, recipient_enc_keys):
 
 
 def open_item(sk, wrap_index, wraps):
-    """A recipient at `wrap_index` (1=taker, 2=maker, 3=house) opens its wrap and
+    """A recipient at `wrap_index` (1=self/arming seat, 2=house) opens its wrap and
     decrypts wraps[0] -> the item plaintext (`abi.encode(item)||salt`)."""
     content_key = hpke_open(sk, wraps[wrap_index])
     nonce, ct = wraps[0][:12], wraps[0][12:]
@@ -348,7 +355,7 @@ def build_open_side_sealed(chain_id, domain, leg, sign_hash, recipient_enc_keys,
 
     - draws a CSPRNG salt (unless one is supplied — supply only for a fixture pin);
     - builds C over the FULL leg;
-    - HPKE-seals the plaintext to [taker, maker, house];
+    - HPKE-seals the plaintext to [self, house] — never the counterparty;
     - signs the sealed Leg digest under `domain`;
     - returns the JSON body the Rust submitter (`open_side_sealed`) verifies.
 

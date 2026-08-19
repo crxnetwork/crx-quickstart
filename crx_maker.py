@@ -211,23 +211,26 @@ def _gateway_flow(endpoint, payload):
 
 # ── arm-encrypt P5: the SEALED half-arm (OPEN_SIDE) ───────────────────────────
 # The maker seals its own half of a trade: a CSPRNG salt hides every leg field
-# behind a commitment C, the terms are HPKE-encrypted to {taker, maker, house},
-# and the seat signs the sealed EIP-712 Leg digest. See arm_seal.py. This is a
-# NEW path — the plaintext quote()/deposit()/withdraw() flows above are untouched.
+# behind a commitment C, the terms are HPKE-encrypted to {self=maker, house}, and
+# the seat signs the sealed EIP-712 Leg digest. See arm_seal.py. The maker NEVER
+# wraps to the taker, so it never needs the taker's encKey and never learns the
+# counterparty. This is a NEW path — the plaintext quote()/deposit()/withdraw()
+# flows above are untouched.
 
 SUBMIT_BASE = os.environ.get("CRX_SUBMIT_BASE", BASE).rstrip("/")
 
 
 def _enc_keys():
-    """The three recipients' on-chain X25519 encKeys, in wrap order [taker, maker,
-    house]. Sourced from CRX_ENC_KEYS ("0xtaker,0xmaker,0xhouse") — each a bytes32.
-    In production the taker/house keys ride on the RFQ payload and /health; pass
-    them per-arm to arm_open_side_sealed instead of the env for the live values."""
+    """The maker's OWN recipients, in wrap order [self=maker, house]. Sourced from
+    CRX_ENC_KEYS ("0xself,0xhouse") — each a bytes32. The maker wraps only to
+    itself and CRX; it NEVER needs the taker's encKey, so the counterparty stays
+    private. `self` is the maker's own seat key; `house` is a CRX constant that
+    rides on /health. Pass enc_keys= per-arm to override the env."""
     raw = os.environ.get("CRX_ENC_KEYS", "")
     keys = [k.strip() for k in raw.split(",") if k.strip()]
-    if len(keys) != 3:
+    if len(keys) != 2:
         raise CrxError(0, {"code": "enc_keys_unset",
-                           "error": "set CRX_ENC_KEYS=0xtaker,0xmaker,0xhouse (bytes32 each) "
+                           "error": "set CRX_ENC_KEYS=0xself,0xhouse (bytes32 each) "
                                     "or pass enc_keys= to arm_open_side_sealed"})
     return keys
 
@@ -236,7 +239,7 @@ def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=False,
                          nonce=None, client_quote_id=None):
     """Seal and broadcast the maker's OPEN_SIDE half-arm for one RFQ.
 
-    Builds C over the FULL leg, HPKE-seals the terms to [taker, maker, house],
+    Builds C over the FULL leg, HPKE-seals the terms to [self=maker, house],
     signs the sealed Leg digest, and POSTs the envelope to the submitter's
     `/submit/open-side-sealed`. Returns the submitter's receipt JSON."""
     import arm_seal
