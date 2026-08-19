@@ -209,6 +209,74 @@ def _gateway_flow(endpoint, payload):
     return [_submit_gateway_tx(w3, tx) for tx in body["transactions"]]
 
 
+# ── arm-encrypt P5: the SEALED half-arm (OPEN_SIDE) ───────────────────────────
+# The maker seals its own half of a trade: a CSPRNG salt hides every leg field
+# behind a commitment C, the terms are HPKE-encrypted to {taker, maker, house},
+# and the seat signs the sealed EIP-712 Leg digest. See arm_seal.py. This is a
+# NEW path — the plaintext quote()/deposit()/withdraw() flows above are untouched.
+
+SUBMIT_BASE = os.environ.get("CRX_SUBMIT_BASE", BASE).rstrip("/")
+
+
+def _enc_keys():
+    """The three recipients' on-chain X25519 encKeys, in wrap order [taker, maker,
+    house]. Sourced from CRX_ENC_KEYS ("0xtaker,0xmaker,0xhouse") — each a bytes32.
+    In production the taker/house keys ride on the RFQ payload and /health; pass
+    them per-arm to arm_open_side_sealed instead of the env for the live values."""
+    raw = os.environ.get("CRX_ENC_KEYS", "")
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if len(keys) != 3:
+        raise CrxError(0, {"code": "enc_keys_unset",
+                           "error": "set CRX_ENC_KEYS=0xtaker,0xmaker,0xhouse (bytes32 each) "
+                                    "or pass enc_keys= to arm_open_side_sealed"})
+    return keys
+
+
+def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=False,
+                         nonce=None, client_quote_id=None):
+    """Seal and broadcast the maker's OPEN_SIDE half-arm for one RFQ.
+
+    Builds C over the FULL leg, HPKE-seals the terms to [taker, maker, house],
+    signs the sealed Leg digest, and POSTs the envelope to the submitter's
+    `/submit/open-side-sealed`. Returns the submitter's receipt JSON."""
+    import arm_seal
+    cqid = client_quote_id or f"{rfq['pair']}.{rfq['rfq_id'][2:14]}"
+    n = nonce if nonce is not None else _nonce(CUSTODY, cqid)
+    chain_key = rfq["chain"]
+    chain_id = CHAINS[chain_key]["chain_id"]
+    domain = _separator(chain_key)  # asserts against /health before signing
+
+    # The FULL leg the commitment hides. Canonical units: seconds, 6-dp integers.
+    leg = {
+        "seat": CUSTODY,
+        "legId": rfq["leg_id"],
+        "joinRef": rfq["join_ref"],
+        "pair": rfq["pair_id"],
+        "instrumentId": NDF,
+        "side": rfq["side"],
+        "notional": int(Decimal(str(rfq["notional"])).scaleb(6)),
+        "rate": int(Decimal(str(rate)).scaleb(6)),
+        "imBps": FLAT_IM_BPS,
+        "premiumBps": rfq["premium_bps"],
+        "expiry": rfq["expiry"] // 1000,
+        "nonce": n,
+        "quoteExpiry": rfq["quote_expiry"] // 1000,
+    }
+
+    def _sign(digest):
+        sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
+        assert Account._recover_hash(digest, signature=sig) == SIGNER.address
+        return sig
+
+    body, _digest = arm_seal.build_open_side_sealed(
+        chain_id, domain, leg, _sign, enc_keys or _enc_keys(),
+        include_witness=include_witness)
+
+    path = "/submit/open-side-sealed"
+    headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
+    return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
+
+
 def deposit(chain, symbol, amount):
     return _gateway_flow("deposit", {"chain": chain, "symbol": symbol, "amount": amount})
 
