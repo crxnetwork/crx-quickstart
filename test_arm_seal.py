@@ -200,6 +200,185 @@ def test_build_open_side_sealed_body_and_digest():
     assert "0x" + A.commit_leg(leg, salt).hex() == body["commitment"]
 
 
+def _fresh_enc_keys():
+    """A maker's OWN two recipients [self, house] — the taker key is never here."""
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    self_sk = X25519PrivateKey.generate()
+    house_sk = X25519PrivateKey.generate()
+    enc = [self_sk.public_key().public_bytes_raw(), house_sk.public_key().public_bytes_raw()]
+    sks = [self_sk.private_bytes_raw(), house_sk.private_bytes_raw()]
+    return enc, sks
+
+
+# ── ALLOCATION builder ────────────────────────────────────────────────────────
+def test_alloc_builder_csprng_salt_present_and_32b():
+    acct = Account.create()
+    item = dict(ALLOC); item["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    b1, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item,
+                                      lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex(),
+                                      enc, include_witness=True)
+    b2, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item,
+                                      lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex(),
+                                      enc, include_witness=True)
+    s1 = bytes.fromhex(b1["witness"]["salt"][2:])
+    assert len(s1) == 32
+    assert not A.salt_is_weak(s1)
+    assert b1["witness"]["salt"] != b2["witness"]["salt"]  # fresh CSPRNG each build
+
+
+def test_alloc_builder_weak_salt_raises():
+    """POSITIVE CONTROL: a weak (all-equal) salt is REFUSED by the builder. Without
+    the guard it would sail through — the whole point of the [[salt brute-force]] fix."""
+    acct = Account.create()
+    item = dict(ALLOC); item["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+    # a strong salt builds fine (control that the path is otherwise valid)
+    ok, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
+                                      salt=A.random_salt())
+    assert ok["commitment"].startswith("0x")
+    # the weak salt raises
+    import pytest
+    with pytest.raises(ValueError):
+        A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
+                                  salt=b"\x5b" * 32)
+
+
+def test_alloc_builder_commitment_and_wrapshash_selfconsistent():
+    acct = Account.create()
+    item = dict(ALLOC); item["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+    salt = A.random_salt()
+    body, digest = A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
+                                             salt=salt, include_witness=True)
+    assert set(body) >= {"chainId", "public", "commitment", "wrapsHash", "wraps", "sig", "witness"}
+    assert set(body["public"]) == {"oldId", "exitingSide", "remainingSide", "incoming",
+                                    "incomingSide", "nonce", "openNonce", "deadline"}
+    assert len(body["wraps"]) == 3  # [ciphertext, wrap_self, wrap_house]
+    assert body["commitment"] == "0x" + A.commit_alloc(item, salt).hex()
+    wraps = [bytes.fromhex(w[2:]) for w in body["wraps"]]
+    assert body["wrapsHash"] == "0x" + A.wraps_hash(wraps).hex()
+    assert Account._recover_hash(digest, signature=body["sig"]) == acct.address
+    assert "0x" + A.commit_alloc(item, body["witness"]["salt"]).hex() == body["commitment"]
+
+
+def test_alloc_builder_fixture_pinned_values():
+    """Deliverable pin: the fixture alloc's C / itemHash / itemId reproduce the
+    contract-emitted fixture (via the module funcs; the fixture salt is weak so the
+    builder guard would reject it — parity lives in the funcs, the guard in the builder)."""
+    at = FIXTURE["armTime"]
+    wh = A.wraps_hash(FIXTURE_WRAPS)
+    c = A.commit_alloc(ALLOC, ALLOC_SALT)
+    assert _hex(c) == FIXTURE["allocation"]["commitment"]
+    assert _hex(wh) == FIXTURE["wrapsHash"]
+    assert _hex(A.alloc_item_hash(at, ALLOC, c, wh)) == FIXTURE["allocation"]["itemHash"]
+    assert _hex(A.alloc_item_id(ALLOC, c)) == FIXTURE["allocation"]["itemId"]
+
+
+def test_alloc_builder_hpke_self_house_only_no_counterparty_leak():
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    import pyhpke
+    acct = Account.create()
+    item = dict(ALLOC); item["incoming"] = acct.address
+    enc, sks = _fresh_enc_keys()
+    taker_sk = X25519PrivateKey.generate().private_bytes_raw()
+    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+    salt = A.random_salt()
+    body, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
+                                        salt=salt, include_witness=True)
+    wraps = [bytes.fromhex(w[2:]) for w in body["wraps"]]
+    want = A.encode_item_plaintext(A.ALLOC_FULL_FIELDS, A.ALLOC_FULL_TYPES, item, salt)
+    for i in range(2):  # self, house open their wrap -> plaintext
+        assert A.open_item(sks[i], i + 1, wraps) == want
+    for idx in (1, 2):  # the counterparty opens NO wrap
+        try:
+            A.open_item(taker_sk, idx, wraps)
+            assert False, "taker opened an alloc wrap — counterparty leak"
+        except pyhpke.exceptions.OpenError:
+            pass
+
+
+# ── CLOSEOUT builder ──────────────────────────────────────────────────────────
+def test_closeout_builder_csprng_salt_present_and_32b():
+    acct = Account.create()
+    item = dict(CLOSE); item["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+    b1, _ = A.build_closeout_sealed(43113, b"\xD0" * 32, item, sign, enc, include_witness=True)
+    b2, _ = A.build_closeout_sealed(43113, b"\xD0" * 32, item, sign, enc, include_witness=True)
+    s1 = bytes.fromhex(b1["witness"]["salt"][2:])
+    assert len(s1) == 32
+    assert not A.salt_is_weak(s1)
+    assert b1["witness"]["salt"] != b2["witness"]["salt"]
+
+
+def test_closeout_builder_weak_salt_raises():
+    """POSITIVE CONTROL: the closeout builder REFUSES a weak salt; without the guard
+    it would pass."""
+    acct = Account.create()
+    item = dict(CLOSE); item["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+    ok, _ = A.build_closeout_sealed(43113, b"\xD0" * 32, item, sign, enc, salt=A.random_salt())
+    assert ok["commitment"].startswith("0x")
+    import pytest
+    with pytest.raises(ValueError):
+        A.build_closeout_sealed(43113, b"\xD0" * 32, item, sign, enc, salt=b"\x5c" * 32)
+
+
+def test_closeout_builder_commitment_and_wrapshash_selfconsistent():
+    acct = Account.create()
+    item = dict(CLOSE); item["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+    salt = A.random_salt()
+    body, digest = A.build_closeout_sealed(43113, b"\xD0" * 32, item, sign, enc,
+                                           salt=salt, include_witness=True)
+    assert set(body) >= {"chainId", "public", "commitment", "wrapsHash", "wraps", "sig", "witness"}
+    assert set(body["public"]) == {"oldId", "closedOutSide", "remainingSide", "incoming",
+                                    "incomingSide", "nonce", "openNonce", "deadline"}
+    assert len(body["wraps"]) == 3
+    assert body["commitment"] == "0x" + A.commit_closeout(item, salt).hex()
+    wraps = [bytes.fromhex(w[2:]) for w in body["wraps"]]
+    assert body["wrapsHash"] == "0x" + A.wraps_hash(wraps).hex()
+    assert Account._recover_hash(digest, signature=body["sig"]) == acct.address
+    assert "0x" + A.commit_closeout(item, body["witness"]["salt"]).hex() == body["commitment"]
+
+
+def test_closeout_builder_fixture_pinned_values():
+    at = FIXTURE["armTime"]
+    wh = A.wraps_hash(FIXTURE_WRAPS)
+    c = A.commit_closeout(CLOSE, CLOSE_SALT)
+    assert _hex(c) == FIXTURE["closeout"]["commitment"]
+    assert _hex(A.closeout_item_hash(at, CLOSE, c, wh)) == FIXTURE["closeout"]["itemHash"]
+    assert _hex(A.closeout_item_id(CLOSE, c)) == FIXTURE["closeout"]["itemId"]
+
+
+def test_closeout_builder_hpke_self_house_only_no_counterparty_leak():
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    import pyhpke
+    acct = Account.create()
+    item = dict(CLOSE); item["incoming"] = acct.address
+    enc, sks = _fresh_enc_keys()
+    taker_sk = X25519PrivateKey.generate().private_bytes_raw()
+    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+    salt = A.random_salt()
+    body, _ = A.build_closeout_sealed(43113, b"\xD0" * 32, item, sign, enc,
+                                      salt=salt, include_witness=True)
+    wraps = [bytes.fromhex(w[2:]) for w in body["wraps"]]
+    want = A.encode_item_plaintext(A.CLOSE_FULL_FIELDS, A.CLOSE_FULL_TYPES, item, salt)
+    for i in range(2):
+        assert A.open_item(sks[i], i + 1, wraps) == want
+    for idx in (1, 2):
+        try:
+            A.open_item(taker_sk, idx, wraps)
+            assert False, "taker opened a closeout wrap — counterparty leak"
+        except pyhpke.exceptions.OpenError:
+            pass
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

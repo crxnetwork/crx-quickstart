@@ -280,6 +280,58 @@ def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=False,
     return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
 
 
+def arm_allocation_sealed(item, *, chain, enc_keys=None, include_witness=False):
+    """Seal and broadcast the maker's ALLOCATION-consent half-arm.
+
+    Mirrors `arm_open_side_sealed`: a CSPRNG salt hides the full allocation `item`
+    behind C, the terms are HPKE-sealed to [self=maker, house] (NEVER the taker),
+    the seat signs the sealed AllocationConsent digest, and the envelope POSTs to the
+    submitter's `/submit/allocation-sealed`. `item` is the full allocation struct
+    (arm_seal.ALLOC_FULL_FIELDS); `chain` is the chain key. Returns the receipt JSON."""
+    import arm_seal
+    chain_id = CHAINS[chain]["chain_id"]
+    domain = _separator(chain)  # asserts against /health before signing
+
+    def _sign(digest):
+        sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
+        assert Account._recover_hash(digest, signature=sig) == SIGNER.address
+        return sig
+
+    body, _digest = arm_seal.build_allocation_sealed(
+        chain_id, domain, item, _sign, enc_keys or _enc_keys(),
+        include_witness=include_witness)
+
+    path = "/submit/allocation-sealed"
+    headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
+    return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
+
+
+def arm_closeout_sealed(item, *, chain, enc_keys=None, include_witness=False):
+    """Seal and broadcast the maker's CLOSEOUT (liq-RFQ / failover) half-arm.
+
+    Mirrors `arm_open_side_sealed`: a CSPRNG salt hides the full closeout `item`
+    behind C, the terms are HPKE-sealed to [self=maker, house] (NEVER the taker),
+    the seat signs the sealed FailoverConsent digest, and the envelope POSTs to the
+    submitter's `/submit/liq-rfq-sealed`. `item` is the full closeout struct
+    (arm_seal.CLOSE_FULL_FIELDS); `chain` is the chain key. Returns the receipt JSON."""
+    import arm_seal
+    chain_id = CHAINS[chain]["chain_id"]
+    domain = _separator(chain)  # asserts against /health before signing
+
+    def _sign(digest):
+        sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
+        assert Account._recover_hash(digest, signature=sig) == SIGNER.address
+        return sig
+
+    body, _digest = arm_seal.build_closeout_sealed(
+        chain_id, domain, item, _sign, enc_keys or _enc_keys(),
+        include_witness=include_witness)
+
+    path = "/submit/liq-rfq-sealed"
+    headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
+    return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
+
+
 def deposit(chain, symbol, amount):
     return _gateway_flow("deposit", {"chain": chain, "symbol": symbol, "amount": amount})
 

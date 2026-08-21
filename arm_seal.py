@@ -410,3 +410,137 @@ def build_open_side_sealed(chain_id, domain, leg, sign_hash, recipient_enc_keys,
             "salt": "0x" + _b32(salt).hex(),
         }
     return body, digest
+
+
+# ── the ALLOCATION client build: the seat's sealed allocation-consent half-arm ─
+def build_allocation_sealed(chain_id, domain, item, sign_hash, recipient_enc_keys,
+                            salt=None, include_witness=False):
+    """Produce the `/submit/allocation-sealed` request body for one seat's allocation
+    consent. A BYTE-EXACT mirror of `build_open_side_sealed`, swapping the leg for the
+    full allocation item, the commitment for `commit_alloc`, and the digest for
+    `allocation_consent_digest`. The [[salt brute-force]] fix is identical: a CSPRNG
+    32-byte draw, self-rejecting a weak salt — an allocation carries almost no hidden
+    entropy of its own, so the salt IS the entropy.
+
+    Wraps to {self, house} ONLY — never the counterparty. Returns (body, digest)."""
+    if salt is None:
+        salt = random_salt()
+    if salt_is_weak(salt):
+        raise ValueError("refusing a weak salt — draw from secrets.token_bytes(32)")
+
+    commitment = commit_alloc(item, salt)
+    plaintext = encode_item_plaintext(ALLOC_FULL_FIELDS, ALLOC_FULL_TYPES, item, salt)
+    wraps, _ = seal_item(plaintext, recipient_enc_keys)
+    wh = wraps_hash(wraps)
+    digest = allocation_consent_digest(domain, item, commitment, wh)
+    sig = sign_hash(digest)
+
+    body = {
+        "chainId": chain_id,
+        "public": {
+            "oldId": "0x" + _b32(item["oldId"]).hex(),
+            "exitingSide": "0x" + _b32(item["exitingSide"]).hex(),
+            "remainingSide": "0x" + _b32(item["remainingSide"]).hex(),
+            "incoming": _addr(item["incoming"]),
+            "incomingSide": "0x" + _b32(item["incomingSide"]).hex(),
+            "nonce": str(item["nonce"]),
+            "openNonce": str(item["openNonce"]),
+            "deadline": item["deadline"],
+        },
+        "commitment": "0x" + commitment.hex(),
+        "wrapsHash": "0x" + wh.hex(),
+        "wraps": ["0x" + w.hex() for w in wraps],
+        "sig": sig,
+    }
+    if include_witness:
+        body["witness"] = {
+            "item": {
+                "oldId": "0x" + _b32(item["oldId"]).hex(),
+                "exitingSide": "0x" + _b32(item["exitingSide"]).hex(),
+                "remainingSide": "0x" + _b32(item["remainingSide"]).hex(),
+                "incoming": _addr(item["incoming"]),
+                "incomingSide": "0x" + _b32(item["incomingSide"]).hex(),
+                "closeRate": str(item["closeRate"]),
+                "openRate": str(item["openRate"]),
+                "cImBps": item["cImBps"],
+                "bImBps": item["bImBps"],
+                "cIm": str(item["cIm"]),
+                "spread": str(item["spread"]),
+                "premiumBps": item["premiumBps"],
+                "openNonce": str(item["openNonce"]),
+                "nonce": str(item["nonce"]),
+                "deadline": item["deadline"],
+                "pairId": "0x" + _b32(item["pairId"]).hex(),
+                "instrumentId": item["instrumentId"],
+                "side": item["side"],
+                "notional": str(item["notional"]),
+                "expiry": item["expiry"],
+                "settlement": item["settlement"],
+            },
+            "salt": "0x" + _b32(salt).hex(),
+        }
+    return body, digest
+
+
+# ── the CLOSEOUT client build: the seat's sealed liq-RFQ (failover) half-arm ───
+def build_closeout_sealed(chain_id, domain, item, sign_hash, recipient_enc_keys,
+                          salt=None, include_witness=False):
+    """Produce the `/submit/liq-rfq-sealed` request body for one seat's closeout
+    consent. A BYTE-EXACT mirror of `build_open_side_sealed`, swapping the leg for the
+    full closeout item, the commitment for `commit_closeout`, and the digest for
+    `failover_consent_digest` (the FailoverConsent EIP-712 type). Same CSPRNG-salt
+    self-reject — a closeout carries almost no hidden entropy of its own, so the salt
+    IS the entropy.
+
+    Wraps to {self, house} ONLY — never the counterparty. Returns (body, digest)."""
+    if salt is None:
+        salt = random_salt()
+    if salt_is_weak(salt):
+        raise ValueError("refusing a weak salt — draw from secrets.token_bytes(32)")
+
+    commitment = commit_closeout(item, salt)
+    plaintext = encode_item_plaintext(CLOSE_FULL_FIELDS, CLOSE_FULL_TYPES, item, salt)
+    wraps, _ = seal_item(plaintext, recipient_enc_keys)
+    wh = wraps_hash(wraps)
+    digest = failover_consent_digest(domain, item, commitment, wh)
+    sig = sign_hash(digest)
+
+    body = {
+        "chainId": chain_id,
+        "public": {
+            "oldId": "0x" + _b32(item["oldId"]).hex(),
+            "closedOutSide": "0x" + _b32(item["closedOutSide"]).hex(),
+            "remainingSide": "0x" + _b32(item["remainingSide"]).hex(),
+            "incoming": _addr(item["incoming"]),
+            "incomingSide": "0x" + _b32(item["incomingSide"]).hex(),
+            "nonce": str(item["nonce"]),
+            "openNonce": str(item["openNonce"]),
+            "deadline": item["deadline"],
+        },
+        "commitment": "0x" + commitment.hex(),
+        "wrapsHash": "0x" + wh.hex(),
+        "wraps": ["0x" + w.hex() for w in wraps],
+        "sig": sig,
+    }
+    if include_witness:
+        body["witness"] = {
+            "item": {
+                "oldId": "0x" + _b32(item["oldId"]).hex(),
+                "closedOutSide": "0x" + _b32(item["closedOutSide"]).hex(),
+                "remainingSide": "0x" + _b32(item["remainingSide"]).hex(),
+                "incoming": _addr(item["incoming"]),
+                "incomingSide": "0x" + _b32(item["incomingSide"]).hex(),
+                "feedId": "0x" + _b32(item["feedId"]).hex(),
+                "closeTime": item["closeTime"],
+                "cIm": str(item["cIm"]),
+                "spread": str(item["spread"]),
+                "nonce": str(item["nonce"]),
+                "deadline": item["deadline"],
+                "cImBps": item["cImBps"],
+                "openNonce": str(item["openNonce"]),
+                "premiumBps": item["premiumBps"],
+                "subsidyMaxUsd": str(item["subsidyMaxUsd"]),
+            },
+            "salt": "0x" + _b32(salt).hex(),
+        }
+    return body, digest
