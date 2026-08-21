@@ -412,17 +412,30 @@ def build_open_side_sealed(chain_id, domain, leg, sign_hash, recipient_enc_keys,
     return body, digest
 
 
-# ── the ALLOCATION client build: the seat's sealed allocation-consent half-arm ─
-def build_allocation_sealed(chain_id, domain, item, sign_hash, recipient_enc_keys,
-                            salt=None, include_witness=False):
-    """Produce the `/submit/allocation-sealed` request body for one seat's allocation
-    consent. A BYTE-EXACT mirror of `build_open_side_sealed`, swapping the leg for the
-    full allocation item, the commitment for `commit_alloc`, and the digest for
-    `allocation_consent_digest`. The [[salt brute-force]] fix is identical: a CSPRNG
-    32-byte draw, self-rejecting a weak salt — an allocation carries almost no hidden
-    entropy of its own, so the salt IS the entropy.
+# ── the ALLOCATION client build: the multi-seat sealed allocation half-arm ─────
+def build_allocation_sealed(chain_id, domain, item, signers, recipient_enc_keys,
+                            exiting_seat, remaining_seat, salt=None, include_witness=False):
+    """Produce the `/submit/allocation-sealed` request body. Allocation is inherently
+    MULTI-SIGNATURE (the exiting/incoming/remaining seats co-sign), so this is NOT the
+    single-sig open-side shape: it emits `exitingSeat`, `remainingSeat`, and a `sigs`
+    Vec, matching `AllocationSealedRequest` (crx-submitter/src/allocation.rs:90-111).
 
-    Wraps to {self, house} ONLY — never the counterparty. Returns (body, digest)."""
+    The mode is READ from the public fields, exactly as the route reads it:
+      * plain close (`incomingSide == remainingSide`): sigs = [sigExiting, sigRemaining],
+        BOTH over the SAME `allocation_consent_digest`.
+      * allocation (otherwise): sigs = [sigExiting, sigIncoming, sigRemaining] over
+        the exiting `Consent`, the incoming `Acceptance`, and the remaining
+        `VoluntaryAllocationOpenConsent(openNonce, deadline)` — allocation.rs:227-259.
+
+    `signers` is a dict of digest-signers keyed by role — {"exiting", "remaining"} for
+    a plain close, plus {"incoming"} for an allocation. Each `signers[role](digest) ->
+    0x-hex sig` is that seat's own signer; a client rarely holds all keys, so the
+    co-signatures are collected out of band and passed in as callables (or precomputed).
+    `exiting_seat`/`remaining_seat` are `armedBy[side]` — on-chain facts the client
+    names (the chain re-derives and enforces them; a lie only reverts NotArmedBy).
+
+    Same CSPRNG salt + weak-salt self-reject + {self,house}-only wraps as open-side.
+    Returns (body, consent_digest) — the exiting consent is the primary/relayed digest."""
     if salt is None:
         salt = random_salt()
     if salt_is_weak(salt):
@@ -432,8 +445,24 @@ def build_allocation_sealed(chain_id, domain, item, sign_hash, recipient_enc_key
     plaintext = encode_item_plaintext(ALLOC_FULL_FIELDS, ALLOC_FULL_TYPES, item, salt)
     wraps, _ = seal_item(plaintext, recipient_enc_keys)
     wh = wraps_hash(wraps)
-    digest = allocation_consent_digest(domain, item, commitment, wh)
-    sig = sign_hash(digest)
+
+    plain_close = _b32(item["incomingSide"]) == _b32(item["remainingSide"])
+    consent = allocation_consent_digest(domain, item, commitment, wh)
+    if plain_close:
+        for role in ("exiting", "remaining"):
+            if role not in signers:
+                raise ValueError(f"plain close needs signers['{role}']")
+        sigs = [signers["exiting"](consent), signers["remaining"](consent)]
+    else:
+        for role in ("exiting", "incoming", "remaining"):
+            if role not in signers:
+                raise ValueError(f"allocation needs signers['{role}']")
+        acceptance = allocation_acceptance_digest(domain, item, commitment, wh)
+        voluntary = voluntary_open_consent_digest(
+            domain, commitment, item["openNonce"], item["deadline"], wh)
+        sigs = [signers["exiting"](consent),
+                signers["incoming"](acceptance),
+                signers["remaining"](voluntary)]
 
     body = {
         "chainId": chain_id,
@@ -447,10 +476,12 @@ def build_allocation_sealed(chain_id, domain, item, sign_hash, recipient_enc_key
             "openNonce": str(item["openNonce"]),
             "deadline": item["deadline"],
         },
+        "exitingSeat": _addr(exiting_seat),
+        "remainingSeat": _addr(remaining_seat),
         "commitment": "0x" + commitment.hex(),
         "wrapsHash": "0x" + wh.hex(),
         "wraps": ["0x" + w.hex() for w in wraps],
-        "sig": sig,
+        "sigs": sigs,
     }
     if include_witness:
         body["witness"] = {
@@ -479,7 +510,7 @@ def build_allocation_sealed(chain_id, domain, item, sign_hash, recipient_enc_key
             },
             "salt": "0x" + _b32(salt).hex(),
         }
-    return body, digest
+    return body, consent
 
 
 # ── the CLOSEOUT client build: the seat's sealed liq-RFQ (failover) half-arm ───
@@ -531,7 +562,7 @@ def build_closeout_sealed(chain_id, domain, item, sign_hash, recipient_enc_keys,
                 "incoming": _addr(item["incoming"]),
                 "incomingSide": "0x" + _b32(item["incomingSide"]).hex(),
                 "feedId": "0x" + _b32(item["feedId"]).hex(),
-                "closeTime": item["closeTime"],
+                "closeTime": str(item["closeTime"]),  # WireCloseoutItem.close_time is a String (liq_rfq.rs:51)
                 "cIm": str(item["cIm"]),
                 "spread": str(item["spread"]),
                 "nonce": str(item["nonce"]),

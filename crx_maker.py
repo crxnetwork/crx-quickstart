@@ -280,26 +280,33 @@ def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=False,
     return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
 
 
-def arm_allocation_sealed(item, *, chain, enc_keys=None, include_witness=False):
-    """Seal and broadcast the maker's ALLOCATION-consent half-arm.
+def _key_signer(acct):
+    """A digest-signer callable bound to one account, for the allocation `signers` map."""
+    def _sign(digest):
+        sig = Account.unsafe_sign_hash(digest, acct.key).signature.to_0x_hex()
+        assert Account._recover_hash(digest, signature=sig) == acct.address
+        return sig
+    return _sign
 
-    Mirrors `arm_open_side_sealed`: a CSPRNG salt hides the full allocation `item`
-    behind C, the terms are HPKE-sealed to [self=maker, house] (NEVER the taker),
-    the seat signs the sealed AllocationConsent digest, and the envelope POSTs to the
-    submitter's `/submit/allocation-sealed`. `item` is the full allocation struct
-    (arm_seal.ALLOC_FULL_FIELDS); `chain` is the chain key. Returns the receipt JSON."""
+
+def arm_allocation_sealed(item, *, chain, signers, exiting_seat, remaining_seat,
+                          enc_keys=None, include_witness=False):
+    """Seal and broadcast a MULTI-SEAT allocation half-arm.
+
+    Allocation is inherently multi-signature — the exiting/incoming/remaining seats
+    co-sign (allocation.rs). This wrapper does NOT sign for every seat with the local
+    SIGNER; it takes a `signers` map of per-role digest-signers (use `_key_signer(acct)`
+    to build one from a key you hold; collect the other seats' signatures out of band).
+    Plain close (`incomingSide == remainingSide`) needs {"exiting","remaining"};
+    an allocation needs {"exiting","incoming","remaining"}. `exiting_seat`/`remaining_seat`
+    are the `armedBy[side]` addresses. POSTs to `/submit/allocation-sealed`."""
     import arm_seal
     chain_id = CHAINS[chain]["chain_id"]
     domain = _separator(chain)  # asserts against /health before signing
 
-    def _sign(digest):
-        sig = Account.unsafe_sign_hash(digest, SIGNER.key).signature.to_0x_hex()
-        assert Account._recover_hash(digest, signature=sig) == SIGNER.address
-        return sig
-
-    body, _digest = arm_seal.build_allocation_sealed(
-        chain_id, domain, item, _sign, enc_keys or _enc_keys(),
-        include_witness=include_witness)
+    body, _consent = arm_seal.build_allocation_sealed(
+        chain_id, domain, item, signers, enc_keys or _enc_keys(),
+        exiting_seat, remaining_seat, include_witness=include_witness)
 
     path = "/submit/allocation-sealed"
     headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}

@@ -210,17 +210,31 @@ def _fresh_enc_keys():
     return enc, sks
 
 
-# ── ALLOCATION builder ────────────────────────────────────────────────────────
+DOM = b"\xD0" * 32  # any 32-byte domain; the submitter reconstructs the same digest
+
+
+def _acct_signer(acct):
+    return lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
+
+
+def _alloc_parties():
+    """Three distinct seat accounts for a true allocation (exitingSide/incomingSide/
+    remainingSide all distinct in ALLOC). Returns (signers, exiting, incoming, remaining)."""
+    ex, inc, rem = Account.create(), Account.create(), Account.create()
+    signers = {"exiting": _acct_signer(ex), "incoming": _acct_signer(inc),
+               "remaining": _acct_signer(rem)}
+    return signers, ex, inc, rem
+
+
+# ── ALLOCATION builder (multi-signature) ──────────────────────────────────────
 def test_alloc_builder_csprng_salt_present_and_32b():
-    acct = Account.create()
-    item = dict(ALLOC); item["incoming"] = acct.address
+    signers, ex, inc, rem = _alloc_parties()
+    item = dict(ALLOC); item["incoming"] = inc.address
     enc, _ = _fresh_enc_keys()
-    b1, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item,
-                                      lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex(),
-                                      enc, include_witness=True)
-    b2, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item,
-                                      lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex(),
-                                      enc, include_witness=True)
+    b1, _ = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                      ex.address, rem.address, include_witness=True)
+    b2, _ = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                      ex.address, rem.address, include_witness=True)
     s1 = bytes.fromhex(b1["witness"]["salt"][2:])
     assert len(s1) == 32
     assert not A.salt_is_weak(s1)
@@ -230,38 +244,53 @@ def test_alloc_builder_csprng_salt_present_and_32b():
 def test_alloc_builder_weak_salt_raises():
     """POSITIVE CONTROL: a weak (all-equal) salt is REFUSED by the builder. Without
     the guard it would sail through — the whole point of the [[salt brute-force]] fix."""
-    acct = Account.create()
-    item = dict(ALLOC); item["incoming"] = acct.address
+    signers, ex, inc, rem = _alloc_parties()
+    item = dict(ALLOC); item["incoming"] = inc.address
     enc, _ = _fresh_enc_keys()
-    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
-    # a strong salt builds fine (control that the path is otherwise valid)
-    ok, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
-                                      salt=A.random_salt())
+    ok, _ = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                      ex.address, rem.address, salt=A.random_salt())
     assert ok["commitment"].startswith("0x")
-    # the weak salt raises
     import pytest
     with pytest.raises(ValueError):
-        A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
-                                  salt=b"\x5b" * 32)
+        A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                  ex.address, rem.address, salt=b"\x5b" * 32)
 
 
 def test_alloc_builder_commitment_and_wrapshash_selfconsistent():
-    acct = Account.create()
-    item = dict(ALLOC); item["incoming"] = acct.address
+    signers, ex, inc, rem = _alloc_parties()
+    item = dict(ALLOC); item["incoming"] = inc.address
     enc, _ = _fresh_enc_keys()
-    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
     salt = A.random_salt()
-    body, digest = A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
-                                             salt=salt, include_witness=True)
-    assert set(body) >= {"chainId", "public", "commitment", "wrapsHash", "wraps", "sig", "witness"}
-    assert set(body["public"]) == {"oldId", "exitingSide", "remainingSide", "incoming",
-                                    "incomingSide", "nonce", "openNonce", "deadline"}
+    body, consent = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                              ex.address, rem.address,
+                                              salt=salt, include_witness=True)
+    assert set(body) >= {"chainId", "public", "exitingSeat", "remainingSeat",
+                         "commitment", "wrapsHash", "wraps", "sigs", "witness"}
+    assert "sig" not in body  # allocation carries `sigs`, never a singular `sig`
+    assert len(body["sigs"]) == 3  # allocation: [exiting, incoming, remaining]
     assert len(body["wraps"]) == 3  # [ciphertext, wrap_self, wrap_house]
     assert body["commitment"] == "0x" + A.commit_alloc(item, salt).hex()
     wraps = [bytes.fromhex(w[2:]) for w in body["wraps"]]
     assert body["wrapsHash"] == "0x" + A.wraps_hash(wraps).hex()
-    assert Account._recover_hash(digest, signature=body["sig"]) == acct.address
+    assert Account._recover_hash(consent, signature=body["sigs"][0]) == ex.address
     assert "0x" + A.commit_alloc(item, body["witness"]["salt"]).hex() == body["commitment"]
+
+
+def test_alloc_builder_plain_close_two_sigs():
+    """Plain close (incomingSide == remainingSide): 2 sigs, BOTH over the SAME consent
+    digest, and the client sets incoming == remainingSeat (allocation.rs:228-240)."""
+    ex, rem = Account.create(), Account.create()
+    signers = {"exiting": _acct_signer(ex), "remaining": _acct_signer(rem)}
+    item = dict(ALLOC)
+    item["incomingSide"] = item["remainingSide"]  # plain-close shape
+    item["incoming"] = rem.address
+    enc, _ = _fresh_enc_keys()
+    salt = A.random_salt()
+    body, consent = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                              ex.address, rem.address, salt=salt)
+    assert len(body["sigs"]) == 2  # plain close: [exiting, remaining]
+    assert Account._recover_hash(consent, signature=body["sigs"][0]) == ex.address
+    assert Account._recover_hash(consent, signature=body["sigs"][1]) == rem.address
 
 
 def test_alloc_builder_fixture_pinned_values():
@@ -280,13 +309,13 @@ def test_alloc_builder_fixture_pinned_values():
 def test_alloc_builder_hpke_self_house_only_no_counterparty_leak():
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
     import pyhpke
-    acct = Account.create()
-    item = dict(ALLOC); item["incoming"] = acct.address
+    signers, ex, inc, rem = _alloc_parties()
+    item = dict(ALLOC); item["incoming"] = inc.address
     enc, sks = _fresh_enc_keys()
     taker_sk = X25519PrivateKey.generate().private_bytes_raw()
-    sign = lambda d: Account.unsafe_sign_hash(d, acct.key).signature.to_0x_hex()
     salt = A.random_salt()
-    body, _ = A.build_allocation_sealed(43113, b"\xD0" * 32, item, sign, enc,
+    body, _ = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                        ex.address, rem.address,
                                         salt=salt, include_witness=True)
     wraps = [bytes.fromhex(w[2:]) for w in body["wraps"]]
     want = A.encode_item_plaintext(A.ALLOC_FULL_FIELDS, A.ALLOC_FULL_TYPES, item, salt)
@@ -298,6 +327,55 @@ def test_alloc_builder_hpke_self_house_only_no_counterparty_leak():
             assert False, "taker opened an alloc wrap — counterparty leak"
         except pyhpke.exceptions.OpenError:
             pass
+
+
+def test_alloc_interop_body_matches_rust_struct():
+    """WIRE interop: every AllocationSealedRequest field (allocation.rs:90-111) present
+    with the right JSON type, digests recover the right signers, body is serializable.
+    Covers both modes."""
+    import json
+    signers, ex, inc, rem = _alloc_parties()
+    item = dict(ALLOC); item["incoming"] = inc.address
+    enc, _ = _fresh_enc_keys()
+    body, _ = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                        ex.address, rem.address, include_witness=True)
+    # top-level required fields + types
+    assert isinstance(body["chainId"], int)
+    assert set(body) == {"chainId", "public", "exitingSeat", "remainingSeat",
+                         "commitment", "wrapsHash", "wraps", "sigs", "witness"}
+    for k in ("exitingSeat", "remainingSeat", "commitment", "wrapsHash"):
+        assert isinstance(body[k], str) and body[k].startswith("0x")
+    assert isinstance(body["wraps"], list) and all(isinstance(w, str) for w in body["wraps"])
+    assert isinstance(body["sigs"], list) and len(body["sigs"]) == 3
+    # public subset: WireAllocationPublic — nonce/openNonce STRING, deadline int
+    p = body["public"]
+    assert set(p) == {"oldId", "exitingSide", "remainingSide", "incoming",
+                      "incomingSide", "nonce", "openNonce", "deadline"}
+    assert isinstance(p["nonce"], str) and isinstance(p["openNonce"], str)
+    assert isinstance(p["deadline"], int)
+    for k in ("oldId", "exitingSide", "remainingSide", "incoming", "incomingSide"):
+        assert isinstance(p[k], str) and p[k].startswith("0x")
+    # witness item: WireAllocationItem — wide fields STRING, small ints int
+    wi = body["witness"]["item"]
+    assert set(wi) == {"oldId", "exitingSide", "remainingSide", "incoming", "incomingSide",
+                       "closeRate", "openRate", "cImBps", "bImBps", "cIm", "spread",
+                       "premiumBps", "openNonce", "nonce", "deadline", "pairId",
+                       "instrumentId", "side", "notional", "expiry", "settlement"}
+    for k in ("closeRate", "openRate", "cIm", "spread", "openNonce", "nonce", "notional"):
+        assert isinstance(wi[k], str), f"{k} must be a String for the Rust deserializer"
+    for k in ("cImBps", "bImBps", "premiumBps", "deadline", "instrumentId", "side",
+              "expiry", "settlement"):
+        assert isinstance(wi[k], int), f"{k} must be an int"
+    assert isinstance(body["witness"]["salt"], str)
+    json.dumps(body)  # must serialize to JSON without error
+    # digests recover the three declared signers under the same domain
+    c, wh = body["commitment"], body["wrapsHash"]
+    consent = A.allocation_consent_digest(DOM, item, c, wh)
+    acceptance = A.allocation_acceptance_digest(DOM, item, c, wh)
+    voluntary = A.voluntary_open_consent_digest(DOM, c, item["openNonce"], item["deadline"], wh)
+    assert Account._recover_hash(consent, signature=body["sigs"][0]) == ex.address
+    assert Account._recover_hash(acceptance, signature=body["sigs"][1]) == inc.address
+    assert Account._recover_hash(voluntary, signature=body["sigs"][2]) == rem.address
 
 
 # ── CLOSEOUT builder ──────────────────────────────────────────────────────────
@@ -377,6 +455,42 @@ def test_closeout_builder_hpke_self_house_only_no_counterparty_leak():
             assert False, "taker opened a closeout wrap — counterparty leak"
         except pyhpke.exceptions.OpenError:
             pass
+
+
+def test_closeout_interop_body_matches_rust_struct():
+    """WIRE interop: every LiqRfqSealedRequest field (liq_rfq.rs:71-88) present with the
+    right JSON type — SINGULAR `sig`, and witness.closeTime a STRING (the Break B fix:
+    WireCloseoutItem.close_time is String, parse_u64 liq_rfq.rs:122). Serializable."""
+    import json
+    acct = Account.create()
+    item = dict(CLOSE); item["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    sign = _acct_signer(acct)
+    body, digest = A.build_closeout_sealed(43113, DOM, item, sign, enc, include_witness=True)
+    assert isinstance(body["chainId"], int)
+    assert set(body) == {"chainId", "public", "commitment", "wrapsHash", "wraps", "sig", "witness"}
+    assert "sigs" not in body  # closeout carries a SINGULAR `sig`
+    assert isinstance(body["sig"], str) and body["sig"].startswith("0x")
+    for k in ("commitment", "wrapsHash"):
+        assert isinstance(body[k], str) and body[k].startswith("0x")
+    p = body["public"]
+    assert set(p) == {"oldId", "closedOutSide", "remainingSide", "incoming",
+                      "incomingSide", "nonce", "openNonce", "deadline"}
+    assert isinstance(p["nonce"], str) and isinstance(p["openNonce"], str)
+    assert isinstance(p["deadline"], int)
+    wi = body["witness"]["item"]
+    assert set(wi) == {"oldId", "closedOutSide", "remainingSide", "incoming", "incomingSide",
+                       "feedId", "closeTime", "cIm", "spread", "nonce", "deadline",
+                       "cImBps", "openNonce", "premiumBps", "subsidyMaxUsd"}
+    # every String-typed field on WireCloseoutItem — closeTime the load-bearing one
+    for k in ("closeTime", "cIm", "spread", "nonce", "openNonce", "subsidyMaxUsd"):
+        assert isinstance(wi[k], str), f"{k} must be a String for the Rust deserializer"
+    assert isinstance(wi["closeTime"], str) and wi["closeTime"] == str(item["closeTime"])
+    for k in ("deadline", "cImBps", "premiumBps"):
+        assert isinstance(wi[k], int), f"{k} must be an int"
+    json.dumps(body)  # serializable
+    # the singular sig recovers the incoming maker over the failover consent digest
+    assert Account._recover_hash(digest, signature=body["sig"]) == acct.address
 
 
 if __name__ == "__main__":

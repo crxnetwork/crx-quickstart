@@ -24,3 +24,16 @@ Task: build alloc + closeout sealed-envelope producers (FIX 2). CSPRNG-salt disc
 - FULL pytest: 21 passed in 0.43s (11 baseline + 10 new).
 - positive control: commit_alloc(weak) computes fine; builder GUARD raises ValueError. Confirmed both directions.
 - committed 14484f1 on arm-fix-alloc-sealer. NOT pushed. worktree left for gating.
+
+## FIX 2b — adversarial interop breaks (read Rust @ /Users/maxguillabert/.crxfx-cd/repo d34c1052)
+- BREAK A (allocation): AllocationSealedRequest (allocation.rs:90-111) requires exitingSeat, remainingSeat, sigs:Vec — NOT singular sig. Multi-signature. Mode = incomingSide==remainingSide.
+  - REDESIGNED build_allocation_sealed(chain_id, domain, item, signers, enc_keys, exiting_seat, remaining_seat, salt, include_witness).
+  - signers = dict of per-role digest-signers. Choreography (allocation.rs:227-259):
+    * plain close: sigs=[exiting, remaining] BOTH over allocation_consent_digest; client sets incoming==remainingSeat.
+    * allocation: sigs=[exiting→consent, incoming→acceptance, remaining→voluntary_open_consent(openNonce,deadline)].
+  - Returns (body, consent) — exiting consent is the primary/relayed digest.
+  - crx_maker.arm_allocation_sealed reworked: takes signers map + seat addrs; added _key_signer(acct) helper.
+- BREAK B (closeout): singular `sig` was already correct. ONLY bug: witness closeTime was int; WireCloseoutItem.close_time is String (liq_rfq.rs:51, parse_u64:122). Fixed -> str(item["closeTime"]).
+- Added 2 WIRE-interop tests asserting every Rust request-struct field present w/ correct JSON type (str/int/0xhex), + plain-close 2-sig test. Digests recover the declared signers.
+- FULL pytest: 24 passed in 1.53s. py_compile both modules OK.
+- NO OTHER field-type drift: audited alloc/closeout public + witness field-by-field vs Wire* structs — all match.
