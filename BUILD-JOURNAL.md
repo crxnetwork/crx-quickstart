@@ -19,3 +19,8 @@ Task: build alloc + closeout sealed-envelope producers (FIX 2). CSPRNG-salt disc
 - closeout consent digest = failover_consent_digest (:265) — its FailoverConsent fields (oldId,closedOutSide,remainingSide,incoming,incomingSide,nonce,openNonce,deadline) match CLOSE public exactly.
 - allocation consent digest = allocation_consent_digest (:237). allocation_acceptance_digest (:247) is the 2nd-signer/taker path — NOT used by the maker's own consent half-arm (mirrors open_side single-seat sign).
 - crx_maker wrappers take a pre-built full item dict + chain key (no rfq->alloc field-map spec exists). chain_id/domain derived like open_side.
+
+## RESULT
+- FULL pytest: 21 passed in 0.43s (11 baseline + 10 new).
+- positive control: commit_alloc(weak) computes fine; builder GUARD raises ValueError. Confirmed both directions.
+- committed 14484f1 on arm-fix-alloc-sealer. NOT pushed. worktree left for gating.
