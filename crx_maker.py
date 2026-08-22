@@ -2,7 +2,6 @@ __version__ = "2.0.0"
 
 import asyncio, json, os, time, uuid
 from decimal import Decimal
-from urllib.parse import urlparse
 
 import requests, websockets
 from eth_abi import encode
@@ -221,24 +220,6 @@ def _gateway_flow(endpoint, payload):
 SUBMIT_BASE = os.environ.get("CRX_SUBMIT_BASE", BASE).rstrip("/")
 
 
-def _guard_witness_tls(url, body):
-    """The witness carries the PLAINTEXT terms + salt. It is by-design for CRX (a
-    house recipient), but it must never cross the wire in the clear to a remote host.
-    Refuse a witness-bearing body over plain http:// to a non-local host; localhost /
-    127.0.0.1 / ::1 dev over http stays allowed."""
-    if not (isinstance(body, dict) and "witness" in body):
-        return
-    parsed = urlparse(url)
-    if parsed.scheme == "https":
-        return
-    host = (parsed.hostname or "").lower()
-    if host in ("localhost", "127.0.0.1", "::1", ""):
-        return
-    raise CrxError(0, {"code": "witness_plaintext_over_http",
-                       "error": f"refusing to send the plaintext witness over a non-TLS "
-                                f"connection to a remote host ({host}) — use https"})
-
-
 def _enc_keys():
     """The maker's OWN recipients, in wrap order [self=maker, house]. Sourced from
     CRX_ENC_KEYS ("0xself,0xhouse") — each a bytes32. The maker wraps only to
@@ -254,7 +235,7 @@ def _enc_keys():
     return keys
 
 
-def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=True,
+def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=False,
                          nonce=None, client_quote_id=None):
     """Seal and broadcast the maker's OPEN_SIDE half-arm for one RFQ.
 
@@ -295,10 +276,8 @@ def arm_open_side_sealed(rfq, *, rate, enc_keys=None, include_witness=True,
         include_witness=include_witness)
 
     path = "/submit/open-side-sealed"
-    url = f"{SUBMIT_BASE}{path}"
-    _guard_witness_tls(url, body)
     headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
-    return _body(requests.post(url, headers=headers, timeout=15, json=body))
+    return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
 
 
 def _key_signer(acct):
@@ -311,7 +290,7 @@ def _key_signer(acct):
 
 
 def arm_allocation_sealed(item, *, chain, signers, exiting_seat, remaining_seat,
-                          enc_keys=None, include_witness=True):
+                          enc_keys=None, include_witness=False):
     """Seal and broadcast a MULTI-SEAT allocation half-arm.
 
     Allocation is inherently multi-signature — the exiting/incoming/remaining seats
@@ -330,13 +309,11 @@ def arm_allocation_sealed(item, *, chain, signers, exiting_seat, remaining_seat,
         exiting_seat, remaining_seat, include_witness=include_witness)
 
     path = "/submit/allocation-sealed"
-    url = f"{SUBMIT_BASE}{path}"
-    _guard_witness_tls(url, body)
     headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
-    return _body(requests.post(url, headers=headers, timeout=15, json=body))
+    return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
 
 
-def arm_closeout_sealed(item, *, chain, enc_keys=None, include_witness=True):
+def arm_closeout_sealed(item, *, chain, enc_keys=None, include_witness=False):
     """Seal and broadcast the maker's CLOSEOUT (liq-RFQ / failover) half-arm.
 
     Mirrors `arm_open_side_sealed`: a CSPRNG salt hides the full closeout `item`
@@ -358,10 +335,8 @@ def arm_closeout_sealed(item, *, chain, enc_keys=None, include_witness=True):
         include_witness=include_witness)
 
     path = "/submit/liq-rfq-sealed"
-    url = f"{SUBMIT_BASE}{path}"
-    _guard_witness_tls(url, body)
     headers = {**HDR, **sign_rest("POST", path, CUSTODY, SIGNER)}
-    return _body(requests.post(url, headers=headers, timeout=15, json=body))
+    return _body(requests.post(f"{SUBMIT_BASE}{path}", headers=headers, timeout=15, json=body))
 
 
 def deposit(chain, symbol, amount):

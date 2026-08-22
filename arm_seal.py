@@ -350,7 +350,7 @@ def encode_item_plaintext(fields, types, item, salt):
 
 # ── the OPEN_SIDE client build: everything the seat produces for one half-arm ──
 def build_open_side_sealed(chain_id, domain, leg, sign_hash, recipient_enc_keys,
-                           salt=None, include_witness=True):
+                           salt=None, include_witness=False):
     """Produce the `/submit/open-side-sealed` request body for one seat's half-arm.
 
     - draws a CSPRNG salt (unless one is supplied — supply only for a fixture pin);
@@ -414,7 +414,7 @@ def build_open_side_sealed(chain_id, domain, leg, sign_hash, recipient_enc_keys,
 
 # ── the ALLOCATION client build: the multi-seat sealed allocation half-arm ─────
 def build_allocation_sealed(chain_id, domain, item, signers, recipient_enc_keys,
-                            exiting_seat, remaining_seat, salt=None, include_witness=True):
+                            exiting_seat, remaining_seat, salt=None, include_witness=False):
     """Produce the `/submit/allocation-sealed` request body. Allocation is inherently
     MULTI-SIGNATURE (the exiting/incoming/remaining seats co-sign), so this is NOT the
     single-sig open-side shape: it emits `exitingSeat`, `remainingSeat`, and a `sigs`
@@ -515,7 +515,7 @@ def build_allocation_sealed(chain_id, domain, item, signers, recipient_enc_keys,
 
 # ── the CLOSEOUT client build: the seat's sealed liq-RFQ (failover) half-arm ───
 def build_closeout_sealed(chain_id, domain, item, sign_hash, recipient_enc_keys,
-                          salt=None, include_witness=True):
+                          salt=None, include_witness=False):
     """Produce the `/submit/liq-rfq-sealed` request body for one seat's closeout
     consent. A BYTE-EXACT mirror of `build_open_side_sealed`, swapping the leg for the
     full closeout item, the commitment for `commit_closeout`, and the digest for
