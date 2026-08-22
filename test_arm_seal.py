@@ -493,6 +493,76 @@ def test_closeout_interop_body_matches_rust_struct():
     assert Account._recover_hash(digest, signature=body["sig"]) == acct.address
 
 
+# ── Fix 5 interlock: the sealed submit WITNESS is now MANDATORY ────────────────
+# The submitter refuses a witness-less sealed submit (400). So every client builder
+# now DEFAULTS include_witness=True — a caller may still pass False explicitly.
+def test_default_sealed_body_includes_witness_all_three():
+    """With NO include_witness argument, each builder now attaches a witness carrying
+    the plaintext terms + salt, and the salt re-derives C. Previously absent by default."""
+    # OPEN_SIDE — witness rides the terms under `leg`
+    acct = Account.create()
+    leg = dict(LEG); leg["seat"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    body, _ = A.build_open_side_sealed(43113, DOM, leg, _acct_signer(acct), enc)  # default
+    assert "witness" in body, "default open-side build MUST carry a witness now"
+    assert set(body["witness"]) == {"leg", "salt"}
+    assert "0x" + A.commit_leg(leg, body["witness"]["salt"]).hex() == body["commitment"]
+
+    # ALLOCATION — witness rides the terms under `item`
+    signers, ex, inc, rem = _alloc_parties()
+    item = dict(ALLOC); item["incoming"] = inc.address
+    enc, _ = _fresh_enc_keys()
+    body, _ = A.build_allocation_sealed(43113, DOM, item, signers, enc,
+                                        ex.address, rem.address)  # default
+    assert "witness" in body, "default allocation build MUST carry a witness now"
+    assert set(body["witness"]) == {"item", "salt"}
+    assert "0x" + A.commit_alloc(item, body["witness"]["salt"]).hex() == body["commitment"]
+
+    # CLOSEOUT — witness rides the terms under `item`
+    acct = Account.create()
+    ci = dict(CLOSE); ci["incoming"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    body, _ = A.build_closeout_sealed(43113, DOM, ci, _acct_signer(acct), enc)  # default
+    assert "witness" in body, "default closeout build MUST carry a witness now"
+    assert set(body["witness"]) == {"item", "salt"}
+    assert "0x" + A.commit_closeout(ci, body["witness"]["salt"]).hex() == body["commitment"]
+
+
+def test_caller_can_still_opt_out_of_witness():
+    """A caller MAY still pass include_witness=False (e.g. a pure blind relay / test)."""
+    acct = Account.create()
+    leg = dict(LEG); leg["seat"] = acct.address
+    enc, _ = _fresh_enc_keys()
+    body, _ = A.build_open_side_sealed(43113, DOM, leg, _acct_signer(acct), enc,
+                                       include_witness=False)
+    assert "witness" not in body
+
+
+def test_witness_tls_guard():
+    """The witness is PLAINTEXT terms over the wire. The send-path guard refuses a
+    witness-bearing body over plain http:// to a REMOTE host, but allows https and
+    allows http to localhost/127.0.0.1 (dev). A witness-less body is never blocked."""
+    import pytest
+    os.environ.setdefault("CRX_SIGNER_PK", "0x" + "11" * 32)
+    os.environ.setdefault("CRX_CUSTODY", "0x" + "ab" * 20)
+    import crx_maker as cm
+
+    w = {"witness": {"item": {}, "salt": "0x" + "5a" * 32}, "chainId": 43113}
+
+    # http → remote host: REFUSED
+    with pytest.raises(cm.CrxError) as e:
+        cm._guard_witness_tls("http://api.crxfx.com/submit/open-side-sealed", w)
+    assert e.value.code == "witness_plaintext_over_http"
+
+    # https → remote host: allowed
+    cm._guard_witness_tls("https://api.crxfx.com/submit/open-side-sealed", w)
+    # http → localhost / 127.0.0.1 dev: allowed
+    cm._guard_witness_tls("http://localhost:8080/submit/open-side-sealed", w)
+    cm._guard_witness_tls("http://127.0.0.1:8080/submit/open-side-sealed", w)
+    # witness-LESS body over remote http: never blocked (guard fires only on a witness)
+    cm._guard_witness_tls("http://api.crxfx.com/submit/open-side-sealed", {"chainId": 43113})
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
