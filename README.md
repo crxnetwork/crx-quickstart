@@ -13,7 +13,7 @@ set -a; . ./.env; set +a    # a missing name fails at import as KeyError: 'CRX_S
 python3 quote.py
 ```
 
-`CRX_BASE` is optional and defaults to `https://api.crxfx.com`.
+`CRX_BASE` is optional and defaults to `https://api.sandbox.crxfx.com`.
 
 ## quote.py
 

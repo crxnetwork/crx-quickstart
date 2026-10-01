@@ -563,6 +563,26 @@ def test_witness_tls_guard():
     cm._guard_witness_tls("http://api.crxfx.com/submit/open-side-sealed", {"chainId": 43113})
 
 
+def test_base_default_is_the_testnet_gateway():
+    """With CRX_BASE unset, the client and both examples call the Fuji gateway."""
+    import importlib
+    import sys
+    saved = os.environ.pop("CRX_BASE", None)
+    try:
+        os.environ.setdefault("CRX_SIGNER_PK", "0x" + "11" * 32)
+        os.environ.setdefault("CRX_CUSTODY", "0x" + "ab" * 20)
+        import crx_maker as cm
+        cm = importlib.reload(sys.modules["crx_maker"])
+        assert cm.BASE == "https://api.sandbox.crxfx.com"
+    finally:
+        if saved is not None:
+            os.environ["CRX_BASE"] = saved
+    here = os.path.dirname(os.path.abspath(__file__))
+    for rel in ("examples/catch.py", "examples/take.py"):
+        with open(os.path.join(here, rel)) as f:
+            assert 'os.environ.get("CRX_BASE", "https://api.sandbox.crxfx.com")' in f.read(), rel
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

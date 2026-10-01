@@ -7,7 +7,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import keccak
 
-BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
+BASE = os.environ.get("CRX_BASE", "https://api.sandbox.crxfx.com").rstrip("/")
 SIGNER = Account.from_key(os.environ["CRX_TAKER_SIGNER_PK"])
 CUSTODY = os.environ["CRX_TAKER_CUSTODY"].lower()
 CHAIN, PAIR, SIDE, NOTIONAL = "base", "USDJPY", "buy", "25000.00"

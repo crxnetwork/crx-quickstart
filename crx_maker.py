@@ -34,7 +34,7 @@ def _body(response):
     return body
 
 
-BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
+BASE = os.environ.get("CRX_BASE", "https://api.sandbox.crxfx.com").rstrip("/")
 ROOT = BASE
 SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])
 CUSTODY = os.environ["CRX_CUSTODY"].lower()

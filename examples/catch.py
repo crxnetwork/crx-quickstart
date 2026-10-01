@@ -3,7 +3,7 @@ import requests, websockets
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
-BASE = os.environ.get("CRX_BASE", "https://api.crxfx.com").rstrip("/")
+BASE = os.environ.get("CRX_BASE", "https://api.sandbox.crxfx.com").rstrip("/")
 SIGNER = Account.from_key(os.environ["CRX_SIGNER_PK"])
 CUSTODY = os.environ["CRX_CUSTODY"].lower()
 CHAIN_ID = requests.get(f"{BASE}/health", timeout=10).json()["chains"][0]["chain_id"]
