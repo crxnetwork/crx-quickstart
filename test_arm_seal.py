@@ -493,18 +493,18 @@ def test_closeout_interop_body_matches_rust_struct():
     assert Account._recover_hash(digest, signature=body["sig"]) == acct.address
 
 
-# ── Fix 5 interlock: the sealed submit WITNESS is now MANDATORY ────────────────
+# ── The sealed submit WITNESS is MANDATORY ─────────────────────────────────────
 # The submitter refuses a witness-less sealed submit (400). So every client builder
-# now DEFAULTS include_witness=True — a caller may still pass False explicitly.
+# DEFAULTS include_witness=True — a caller may pass False explicitly.
 def test_default_sealed_body_includes_witness_all_three():
-    """With NO include_witness argument, each builder now attaches a witness carrying
-    the plaintext terms + salt, and the salt re-derives C. Previously absent by default."""
+    """With NO include_witness argument, each builder attaches a witness carrying
+    the plaintext terms + salt, and the salt re-derives C."""
     # OPEN_SIDE — witness rides the terms under `leg`
     acct = Account.create()
     leg = dict(LEG); leg["seat"] = acct.address
     enc, _ = _fresh_enc_keys()
     body, _ = A.build_open_side_sealed(43113, DOM, leg, _acct_signer(acct), enc)  # default
-    assert "witness" in body, "default open-side build MUST carry a witness now"
+    assert "witness" in body, "default open-side build MUST carry a witness"
     assert set(body["witness"]) == {"leg", "salt"}
     assert "0x" + A.commit_leg(leg, body["witness"]["salt"]).hex() == body["commitment"]
 
@@ -514,7 +514,7 @@ def test_default_sealed_body_includes_witness_all_three():
     enc, _ = _fresh_enc_keys()
     body, _ = A.build_allocation_sealed(43113, DOM, item, signers, enc,
                                         ex.address, rem.address)  # default
-    assert "witness" in body, "default allocation build MUST carry a witness now"
+    assert "witness" in body, "default allocation build MUST carry a witness"
     assert set(body["witness"]) == {"item", "salt"}
     assert "0x" + A.commit_alloc(item, body["witness"]["salt"]).hex() == body["commitment"]
 
@@ -523,13 +523,13 @@ def test_default_sealed_body_includes_witness_all_three():
     ci = dict(CLOSE); ci["incoming"] = acct.address
     enc, _ = _fresh_enc_keys()
     body, _ = A.build_closeout_sealed(43113, DOM, ci, _acct_signer(acct), enc)  # default
-    assert "witness" in body, "default closeout build MUST carry a witness now"
+    assert "witness" in body, "default closeout build MUST carry a witness"
     assert set(body["witness"]) == {"item", "salt"}
     assert "0x" + A.commit_closeout(ci, body["witness"]["salt"]).hex() == body["commitment"]
 
 
 def test_caller_can_still_opt_out_of_witness():
-    """A caller MAY still pass include_witness=False (e.g. a pure blind relay / test)."""
+    """A caller MAY pass include_witness=False (e.g. a pure blind relay / test)."""
     acct = Account.create()
     leg = dict(LEG); leg["seat"] = acct.address
     enc, _ = _fresh_enc_keys()

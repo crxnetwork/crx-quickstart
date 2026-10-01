@@ -1,6 +1,6 @@
 """arm-encrypt P5 — the CLIENT side of the sealed arm.
 
-The maker (seat) no longer sends plaintext trade terms on chain. Each confidential
+The maker (seat) sends no plaintext trade terms on chain. Each confidential
 item is SEALED:
 
     C         = keccak256(abi.encode(<full item struct>, salt32))   # commitment
